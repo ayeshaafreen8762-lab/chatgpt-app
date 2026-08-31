@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
 
     if (apiKey) {
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
       // Convert standard role 'assistant' to Gemini role 'model'
       const formattedHistory = Array.isArray(history)
@@ -110,7 +110,7 @@ function generateMockResponse(prompt: string): string {
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 async function run() {
   const result = await model.generateContent("Hello Gemini!");

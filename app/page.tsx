@@ -394,7 +394,7 @@ export default function Home() {
             </button>
             <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-xs text-gray-200 font-medium">
               <Sparkles size={14} className="text-emerald-400" />
-              <span>Gemini 1.5 Flash</span>
+              <span>Gemini 2.5 Flash</span>
             </div>
           </div>
 
