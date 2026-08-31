@@ -3,14 +3,20 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const runtime = "nodejs";
 
+export interface AttachedFilePayload {
+  name: string;
+  type: string;
+  data: string; // base64 representation
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { message, history = [] } = body;
+    const { message, history = [], files = [] } = body;
 
-    if (!message || typeof message !== "string") {
+    if (!message && (!files || files.length === 0)) {
       return NextResponse.json(
-        { error: "A valid 'message' string is required." },
+        { error: "A message string or at least one attached file is required." },
         { status: 400 }
       );
     }
@@ -33,7 +39,30 @@ export async function POST(req: NextRequest) {
         history: formattedHistory,
       });
 
-      const resultStream = await chat.sendMessageStream(message);
+      // Prepare user parts including text message and multimodal inlineData files
+      const userParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+
+      if (Array.isArray(files) && files.length > 0) {
+        for (const file of files as AttachedFilePayload[]) {
+          if (file.data) {
+            const cleanBase64 = file.data.includes(",")
+              ? file.data.split(",")[1]
+              : file.data;
+            userParts.push({
+              inlineData: {
+                mimeType: file.type || "application/octet-stream",
+                data: cleanBase64,
+              },
+            });
+          }
+        }
+      }
+
+      if (message) {
+        userParts.push({ text: message });
+      }
+
+      const resultStream = await chat.sendMessageStream(userParts);
 
       const encoder = new TextEncoder();
       const customStream = new ReadableStream({
@@ -59,18 +88,17 @@ export async function POST(req: NextRequest) {
         },
       });
     } else {
-      // Mock Response Engine when no GEMINI_API_KEY is supplied
-      const mockResponseText = generateMockResponse(message);
+      // Demo / Fallback engine when no GEMINI_API_KEY is supplied
+      const mockResponseText = generateMockMultimodalResponse(message, files);
       const encoder = new TextEncoder();
 
       const stream = new ReadableStream({
         async start(controller) {
-          // Stream words gradually to simulate AI generation
           const words = mockResponseText.split(" ");
           for (let i = 0; i < words.length; i++) {
             const wordChunk = (i === 0 ? "" : " ") + words[i];
             controller.enqueue(encoder.encode(wordChunk));
-            await new Promise((resolve) => setTimeout(resolve, 25));
+            await new Promise((resolve) => setTimeout(resolve, 20));
           }
           controller.close();
         },
@@ -90,39 +118,31 @@ export async function POST(req: NextRequest) {
   }
 }
 
-function generateMockResponse(prompt: string): string {
-  const lower = prompt.toLowerCase();
+function generateMockMultimodalResponse(
+  prompt: string,
+  files: AttachedFilePayload[]
+): string {
+  const hasFiles = files && files.length > 0;
+  const fileNames = hasFiles ? files.map((f) => f.name).join(", ") : "";
 
-  if (lower.includes("hello") || lower.includes("hi") || lower.includes("hey")) {
-    return "Hello! I am your Gemini AI assistant. How can I help you today?";
-  }
+  if (hasFiles) {
+    return `### Multimodal Analysis Report for Attached File(s): \`${fileNames}\`
 
-  if (
-    lower.includes("code") ||
-    lower.includes("python") ||
-    lower.includes("script") ||
-    lower.includes("function") ||
-    lower.includes("javascript")
-  ) {
-    return `Here is a sample solution using Gemini API:
+I have analyzed your uploaded document/image (\`${fileNames}\`).
 
-\`\`\`typescript
-import { GoogleGenerativeAI } from "@google/generative-ai";
+**Key Highlights & Summary:**
+- **File Format & Structure**: Verified valid document/media input.
+- **Content Overview**: The attachment contains structured data, textual paragraphs, or visual components.
+- **Query Response**: Addressing your prompt: "${prompt || "Please analyze this file."}"
+  
+1. **Document Context**: Clean layout parsed successfully.
+2. **Key Insights**: Key sections identified and ready for deep inquiry.
+3. **Recommended Follow-up**: Ask specific questions using the doubt clarification bar below to inspect individual sections or formulas!
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
-
-async function run() {
-  const result = await model.generateContent("Hello Gemini!");
-  console.log(result.response.text());
-}
-run();
-\`\`\`
-
-Let me know if you need specific component examples or hook implementations!`;
+*(Note: Running in **Demo Mode**. Set your \`GEMINI_API_KEY\` in \`.env.local\` to activate full live multimodal processing with Gemini 3.6 Flash.)*`;
   }
 
   return `I received your message: "${prompt}".
 
-*(Note: Running in **Demo Mode**. To enable live AI responses using Gemini, set your \`GEMINI_API_KEY\` in \`.env.local\`.)*`;
+*(Note: Running in **Demo Mode**. Set your \`GEMINI_API_KEY\` in \`.env.local\` to enable live AI responses using Gemini 3.6 Flash.)*`;
 }
