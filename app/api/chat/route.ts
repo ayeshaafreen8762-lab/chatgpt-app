@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const runtime = "nodejs";
 
@@ -14,89 +15,34 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 
     if (apiKey) {
-      // Connect to official OpenAI API with streaming
-      const systemMessage = {
-        role: "system",
-        content: "You are a helpful, clever, concise, and friendly AI assistant.",
-      };
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
+      // Convert standard role 'assistant' to Gemini role 'model'
       const formattedHistory = Array.isArray(history)
         ? history.map((msg: { role: string; content: string }) => ({
-            role: msg.role === "assistant" ? "assistant" : "user",
-            content: msg.content,
+            role: msg.role === "assistant" ? "model" : "user",
+            parts: [{ text: msg.content }],
           }))
         : [];
 
-      const openAiResponse = await fetch(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [systemMessage, ...formattedHistory, { role: "user", content: message }],
-            stream: true,
-          }),
-        }
-      );
+      const chat = model.startChat({
+        history: formattedHistory,
+      });
 
-      if (!openAiResponse.ok) {
-        const errorText = await openAiResponse.text();
-        return NextResponse.json(
-          { error: `OpenAI API error: ${openAiResponse.statusText}`, details: errorText },
-          { status: openAiResponse.status }
-        );
-      }
+      const resultStream = await chat.sendMessageStream(message);
 
-      if (!openAiResponse.body) {
-        return NextResponse.json(
-          { error: "No response body received from OpenAI." },
-          { status: 500 }
-        );
-      }
-
-      // Transform OpenAI Server-Sent Events (SSE) into plain text stream for front-end
       const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
-
       const customStream = new ReadableStream({
         async start(controller) {
-          const reader = openAiResponse.body!.getReader();
-          let buffer = "";
-
           try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-
-              buffer += decoder.decode(value, { stream: true });
-              const lines = buffer.split("\n");
-              buffer = lines.pop() || "";
-
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed.startsWith("data: ")) {
-                  const dataStr = trimmed.replace(/^data: /, "");
-                  if (dataStr === "[DONE]") {
-                    controller.close();
-                    return;
-                  }
-                  try {
-                    const parsed = JSON.parse(dataStr);
-                    const delta = parsed.choices?.[0]?.delta?.content;
-                    if (delta) {
-                      controller.enqueue(encoder.encode(delta));
-                    }
-                  } catch {
-                    // Ignore JSON parse errors for incomplete chunks
-                  }
-                }
+            for await (const chunk of resultStream.stream) {
+              const text = chunk.text();
+              if (text) {
+                controller.enqueue(encoder.encode(text));
               }
             }
             controller.close();
@@ -113,7 +59,7 @@ export async function POST(req: NextRequest) {
         },
       });
     } else {
-      // Mock Response Engine when no OPENAI_API_KEY is supplied
+      // Mock Response Engine when no GEMINI_API_KEY is supplied
       const mockResponseText = generateMockResponse(message);
       const encoder = new TextEncoder();
 
@@ -138,7 +84,8 @@ export async function POST(req: NextRequest) {
       });
     }
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "Internal Server Error";
+    const errorMessage =
+      error instanceof Error ? error.message : "Internal Server Error";
     return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
@@ -147,43 +94,35 @@ function generateMockResponse(prompt: string): string {
   const lower = prompt.toLowerCase();
 
   if (lower.includes("hello") || lower.includes("hi") || lower.includes("hey")) {
-    return "Hello! I am your AI assistant. How can I help you today?";
+    return "Hello! I am your Gemini AI assistant. How can I help you today?";
   }
 
-  if (lower.includes("code") || lower.includes("python") || lower.includes("script") || lower.includes("function") || lower.includes("javascript")) {
-    return `Here is a sample solution for your request:
+  if (
+    lower.includes("code") ||
+    lower.includes("python") ||
+    lower.includes("script") ||
+    lower.includes("function") ||
+    lower.includes("javascript")
+  ) {
+    return `Here is a sample solution using Gemini API:
 
 \`\`\`typescript
-// Quick Example: Asynchronous Fetch in TypeScript
-async function fetchData<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(\`HTTP error! status: \${response.status}\`);
-  }
-  return await response.json() as T;
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+async function run() {
+  const result = await model.generateContent("Hello Gemini!");
+  console.log(result.response.text());
 }
-
-// Usage
-console.log("Ready to query backend API!");
+run();
 \`\`\`
-
-You can copy this snippet or ask me to modify it for your specific framework!`;
-  }
-
-  if (lower.includes("next") || lower.includes("react") || lower.includes("tailwind")) {
-    return `Next.js App Router and Tailwind CSS offer a powerful stack for modern web applications!
-
-Key Highlights:
-- **Server & Client Components**: Optimizes performance by shipping minimal JavaScript to the client.
-- **Route Handlers**: Easily build API endpoints right inside \`app/api/\`.
-- **Tailwind CSS**: Utility-first styling with high customizability and instant dark mode support.
 
 Let me know if you need specific component examples or hook implementations!`;
   }
 
   return `I received your message: "${prompt}".
 
-*(Note: Running in **Demo Mode**. To enable live AI responses using OpenAI, set your \`OPENAI_API_KEY\` in \`.env.local\`.)*
-
-Is there anything specific you would like me to assist you with, such as writing code, brainstorming ideas, or formatting text?`;
+*(Note: Running in **Demo Mode**. To enable live AI responses using Gemini, set your \`GEMINI_API_KEY\` in \`.env.local\`.)*`;
 }
