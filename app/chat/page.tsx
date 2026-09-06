@@ -1,322 +1,491 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
-  Plus,
-  Send,
-  Square,
-  PanelLeft,
-  Bot,
-  User,
   Sparkles,
-  Paperclip,
-  X,
-  FileText,
-  Image as ImageIcon,
-  Loader2,
-  HelpCircle,
-  Zap,
-  Lightbulb,
+  Bot,
+  User as UserIcon,
+  PanelLeft,
+  Square,
   FileSearch,
-  CheckCircle2,
+  BookOpen,
+  Cpu,
+  RefreshCw,
+  Atom,
+  Sigma,
+  FileText,
 } from "lucide-react";
-import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import { AppSidebar, ChatSession } from "@/components/AppSidebar";
-
-export interface AttachedFile {
-  id: string;
-  name: string;
-  type: string;
-  size: number;
-  data: string; // base64 string
-  previewUrl?: string;
-}
+import { VisualRenderer } from "@/components/VisualRenderer";
+import { ChatInputBar } from "@/components/ChatInputBar";
+import { DocumentPreviewCard, AttachedDoc } from "@/components/DocumentPreviewCard";
+import { CameraModal } from "@/components/CameraModal";
+import { UserProfileModal } from "@/components/UserProfileModal";
+import { ModelSwitcher, readPersistedModelId } from "@/components/ModelSwitcher";
+import { useAuth } from "@/context/AuthContext";
 
 export interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   timestamp: number;
-  files?: AttachedFile[];
+  files?: any[];
 }
 
-const LOCAL_STORAGE_KEY = "omni_ai_chat_sessions_v2";
+const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
-const DOUBT_CHIPS = [
+const QUICK_DOUBT_TEMPLATES = [
   {
-    label: "Summarize Document",
-    prompt: "Provide a comprehensive summary of this document highlighting the key takeaways.",
-    icon: FileSearch,
+    title: "Derive Physics Law",
+    prompt: "Derive the law of conservation of angular momentum and show a Mermaid flowchart of the steps.",
+    icon: Atom,
   },
   {
-    label: "Key Formulas & Data",
-    prompt: "Extract all important metrics, numerical data, and key formulas from this file.",
-    icon: Zap,
+    title: "Plot Math Equation",
+    prompt: "Solve and plot the roots of the quadratic function f(x) = x^2 - 4x + 3 using Recharts with step-by-step LaTeX derivation.",
+    icon: Sigma,
   },
   {
-    label: "Explain Key Sections",
-    prompt: "Break down the core sections of this file in simple, easy-to-understand terms.",
-    icon: Lightbulb,
+    title: "Algorithm Flowchart",
+    prompt: "Explain Dijkstra's shortest path algorithm step-by-step with a Mermaid logic tree and time complexity formula in LaTeX.",
+    icon: Cpu,
   },
   {
-    label: "Action Items & Risks",
-    prompt: "Identify any action items, recommendations, or potential risks mentioned in this attached file.",
-    icon: CheckCircle2,
+    title: "Textbook Doubt Solver",
+    prompt: "Explain the Heisenberg uncertainty principle and state its mathematical formulation using display math LaTeX.",
+    icon: BookOpen,
   },
 ];
 
-function generateUniqueId(prefix: string): string {
-  if (typeof window !== "undefined" && window.crypto && window.crypto.randomUUID) {
-    return `${prefix}_${window.crypto.randomUUID()}`;
-  }
-  return `${prefix}_${Math.random().toString(36).substring(2, 9)}_${Date.now()}`;
-}
-
-function createInitialSession(): ChatSession {
-  return {
-    id: generateUniqueId("chat"),
-    title: "New Analysis",
-    createdAt: Date.now(),
-  };
-}
-
 export default function ChatPage() {
+  const { user, getAuthHeaders, isAuthenticated, logout } = useAuth();
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-        }
-      } catch (e) {
-        console.error("Failed to load chat sessions", e);
-      }
-    }
-    return [createInitialSession()];
-  });
-
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(() => {
-    return sessions.length > 0 ? sessions[0].id : null;
-  });
-
+  // Default model is loaded from localStorage (scoped per user) after mount
+  const [selectedModel, setSelectedModel] = useState("groq/compound");
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionMessages, setSessionMessages] = useState<Record<string, Message[]>>({});
-  const [inputMessage, setInputMessage] = useState("");
-  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [doubtInput, setDoubtInput] = useState("");
+  const [activeDocument, setActiveDocument] = useState<AttachedDoc | null>(null);
+  // Fallback notice: shown when the backend switched to a different model
+  const [fallbackNotice, setFallbackNotice] = useState<{ original: string; used: string } | null>(null);
+  const [modelUsed, setModelUsed] = useState<string>("");
+
+  // Modals
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Sync sessions to localStorage
-  useEffect(() => {
-    if (sessions.length > 0) {
-      try {
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(sessions));
-      } catch (e) {
-        console.error("Failed to save sessions", e);
-      }
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior, block: "end" });
     }
-  }, [sessions]);
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    }
+  }, []);
+
+  // Restore persisted model selection scoped to the logged-in user
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const persisted = readPersistedModelId(user?.id, "groq/compound");
+    if (persisted) setSelectedModel(persisted);
+  }, [user?.id]);
+
+  // Fetch or initialize sessions
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/chat/sessions`, {
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.sessions && Array.isArray(data.sessions) && data.sessions.length > 0) {
+          setSessions(data.sessions);
+          if (!activeSessionId) {
+            setActiveSessionId(data.sessions[0].id);
+            fetchSessionMessages(data.sessions[0].id);
+          }
+        } else {
+          await createNewSession();
+        }
+      }
+    } catch (err) {
+      console.warn("Could not connect to backend sessions, using local mode:", err);
+      // Fallback local session
+      const localId = `sess_${Date.now()}`;
+      setSessions([{ id: localId, title: "New Doubt Session", createdAt: Date.now() }]);
+      setActiveSessionId(localId);
+    }
+  };
+
+  const fetchSessionMessages = async (sessionId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/chat/sessions/${sessionId}/messages`, {
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.messages) {
+          const formatted: Message[] = data.messages.map((m: any) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            timestamp: m.timestamp * 1000,
+          }));
+          setSessionMessages((prev) => ({ ...prev, [sessionId]: formatted }));
+        }
+      }
+    } catch (err) {
+      console.warn("Fetch messages note:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSessions();
+  }, [isAuthenticated]);
 
   const currentMessages = useMemo(() => {
     return activeSessionId ? sessionMessages[activeSessionId] || [] : [];
   }, [sessionMessages, activeSessionId]);
 
-  // Auto scroll to bottom
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [currentMessages, isStreaming]);
+    scrollToBottom("smooth");
+  }, [currentMessages, isStreaming, activeDocument, scrollToBottom]);
 
-  // Handle file uploads
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const createNewSession = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/chat/sessions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({
+          title: "New Doubt Session",
+          model: selectedModel,
+        }),
+      });
 
-    Array.from(files).forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const base64Data = event.target?.result as string;
-        const isImage = file.type.startsWith("image/");
-        const newFile: AttachedFile = {
-          id: generateUniqueId("file"),
-          name: file.name,
-          type: file.type || "application/octet-stream",
-          size: file.size,
-          data: base64Data,
-          previewUrl: isImage ? base64Data : undefined,
+      if (res.ok) {
+        const data = await res.json();
+        const newSess = {
+          id: data.session.id,
+          title: data.session.title,
+          createdAt: Date.now(),
         };
-        setAttachedFiles((prev) => [...prev, newFile]);
-      };
-      reader.readAsDataURL(file);
-    });
-
-    if (fileInputRef.current) fileInputRef.current.value = "";
+        setSessions((prev) => [newSess, ...prev]);
+        setActiveSessionId(newSess.id);
+        setSessionMessages((prev) => ({ ...prev, [newSess.id]: [] }));
+        setActiveDocument(null);
+      }
+    } catch (err) {
+      const localId = `sess_${Date.now()}`;
+      const newSess = { id: localId, title: "New Doubt Session", createdAt: Date.now() };
+      setSessions((prev) => [newSess, ...prev]);
+      setActiveSessionId(localId);
+      setSessionMessages((prev) => ({ ...prev, [localId]: [] }));
+      setActiveDocument(null);
+    }
   };
 
-  const removeAttachedFile = (fileId: string) => {
-    setAttachedFiles((prev) => prev.filter((f) => f.id !== fileId));
-  };
-
-  const createNewChat = () => {
-    if (isStreaming) stopGeneration();
-    const newSession = createInitialSession();
-    setSessions((prev) => [newSession, ...prev]);
-    setActiveSessionId(newSession.id);
-    setAttachedFiles([]);
-    setInputMessage("");
-  };
-
-  const deleteChat = (e: React.MouseEvent, id: string) => {
+  const handleDeleteSession = async (e: React.MouseEvent, sessId: string) => {
     e.stopPropagation();
-    if (isStreaming && activeSessionId === id) stopGeneration();
-    const updated = sessions.filter((s) => s.id !== id);
-    setSessions(updated);
+    try {
+      await fetch(`${API_BASE}/api/chat/sessions/${sessId}`, {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      });
+    } catch (err) {
+      console.warn("Delete session error:", err);
+    }
+
+    setSessions((prev) => prev.filter((s) => s.id !== sessId));
     setSessionMessages((prev) => {
       const copy = { ...prev };
-      delete copy[id];
+      delete copy[sessId];
       return copy;
     });
 
-    if (updated.length === 0) {
-      const fallback = createInitialSession();
-      setSessions([fallback]);
-      setActiveSessionId(fallback.id);
-    } else if (activeSessionId === id) {
-      setActiveSessionId(updated[0].id);
+    if (activeSessionId === sessId) {
+      const remaining = sessions.filter((s) => s.id !== sessId);
+      if (remaining.length > 0) {
+        setActiveSessionId(remaining[0].id);
+        fetchSessionMessages(remaining[0].id);
+      } else {
+        createNewSession();
+      }
     }
   };
 
-  const stopGeneration = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+  // Handle ANY File Upload (PDF, DOCX, TXT, CSV, Images) via RAG endpoint
+  const handleFileUpload = async (file: File) => {
+    console.log("[handleFileUpload] Processing file:", file.name, file.size, file.type);
+    const isImage = file.type.startsWith("image/");
+    const localPreviewUrl = isImage ? URL.createObjectURL(file) : undefined;
+
+    // Set preliminary document state so chip appears immediately in the input bar
+    const docData: AttachedDoc = {
+      filename: file.name,
+      fileType: isImage ? "image" : file.name.split(".").pop() || "document",
+      fileSize: file.size,
+      pageCount: 1,
+      imageDataUrl: localPreviewUrl,
+    };
+    setActiveDocument(docData);
+    setTimeout(() => scrollToBottom("smooth"), 50);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      // Do NOT set Content-Type manually for FormData - browser sets multipart/form-data + boundary automatically
+      const uploadHeaders: Record<string, string> = {};
+      const authHeaders = getAuthHeaders();
+      if (authHeaders["Authorization"]) {
+        uploadHeaders["Authorization"] = authHeaders["Authorization"];
+      }
+
+      const res = await fetch(`${API_BASE}/api/documents/upload`, {
+        method: "POST",
+        headers: uploadHeaders,
+        body: formData,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const docInfo = data.document;
+        setActiveDocument({
+          id: docInfo.id,
+          filename: docInfo.filename,
+          fileType: docInfo.fileType,
+          fileSize: docInfo.fileSize,
+          pageCount: docInfo.pageCount,
+          previewSnippet: docInfo.previewSnippet,
+          imageDataUrl: localPreviewUrl,
+        });
+        setTimeout(() => scrollToBottom("smooth"), 50);
+
+        // Optionally fetch full chunk details for inspector
+        if (docInfo.id) {
+          const detailRes = await fetch(`${API_BASE}/api/documents/${docInfo.id}`);
+          if (detailRes.ok) {
+            const detailData = await detailRes.json();
+            setActiveDocument((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    extractedText: detailData.document.extractedText,
+                    chunks: detailData.document.chunks,
+                  }
+                : null
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Upload to backend error, using local fallback:", err);
     }
-    setIsStreaming(false);
   };
 
-  const handleSendMessage = async (customText?: string, filesToSend?: AttachedFile[]) => {
-    const text = (customText || inputMessage).trim();
-    const activeFiles = filesToSend || attachedFiles;
+  // Handle Camera Snapshot Capture
+  const handleCameraCapture = async (imageDataUrl: string) => {
+    console.log("[handleCameraCapture] Camera capture received, bytes length:", imageDataUrl.length);
+    const docData: AttachedDoc = {
+      filename: `Camera_Doubt_${new Date().toLocaleTimeString().replace(/:/g, "-")}.jpg`,
+      fileType: "image",
+      fileSize: Math.round((imageDataUrl.length * 3) / 4),
+      pageCount: 1,
+      imageDataUrl: imageDataUrl,
+    };
+    setActiveDocument(docData);
+    setTimeout(() => scrollToBottom("smooth"), 50);
 
-    if ((!text && activeFiles.length === 0) || isStreaming || !activeSessionId) return;
+    // Send snapshot as file to backend RAG
+    try {
+      const res = await fetch(imageDataUrl);
+      const blob = await res.blob();
+      const file = new File([blob], docData.filename, { type: "image/jpeg" });
+      handleFileUpload(file);
+    } catch (err) {
+      console.warn("Camera blob conversion error:", err);
+    }
+  };
 
-    setInputMessage("");
-    setDoubtInput("");
-    setAttachedFiles([]);
-    if (textareaRef.current) textareaRef.current.style.height = "auto";
+  // Main SSE Message Sender with Groq / RAG
+  const handleSendMessage = async (userText: string) => {
+    if (!userText.trim() || isStreaming) return;
 
-    const userMsg: Message = {
-      id: generateUniqueId("msg_user"),
+    const currentSessId = activeSessionId || `sess_${Date.now()}`;
+    const userMsgId = `msg_user_${Date.now()}`;
+    const asstMsgId = `msg_asst_${Date.now()}`;
+
+    // Snapshot attached document for this message and clear input bar attachment state
+    const attachedDocForMessage = activeDocument;
+    setActiveDocument(null);
+
+    const newUserMsg: Message = {
+      id: userMsgId,
       role: "user",
-      content: text || (activeFiles.length > 0 ? `Analyzed file: ${activeFiles[0].name}` : ""),
+      content: userText,
       timestamp: Date.now(),
-      files: activeFiles.length > 0 ? activeFiles : undefined,
+      files: attachedDocForMessage ? [{ ...attachedDocForMessage }] : undefined,
     };
 
-    const assistantMsgId = generateUniqueId("msg_ast");
-    const assistantPlaceholder: Message = {
-      id: assistantMsgId,
+    const initialAsstMsg: Message = {
+      id: asstMsgId,
       role: "assistant",
       content: "",
       timestamp: Date.now(),
     };
 
-    // Update active session messages
-    setSessionMessages((prev) => {
-      const existing = prev[activeSessionId] || [];
-      return {
-        ...prev,
-        [activeSessionId]: [...existing, userMsg, assistantPlaceholder],
-      };
-    });
-
-    // Update session title if first message
-    setSessions((prevSessions) =>
-      prevSessions.map((s) => {
-        if (s.id === activeSessionId && s.title === "New Analysis") {
-          const newTitle = text.length > 25 ? text.substring(0, 25) + "..." : text || activeFiles[0]?.name || "Document Analysis";
-          return { ...s, title: newTitle };
-        }
-        return s;
-      })
-    );
+    setSessionMessages((prev) => ({
+      ...prev,
+      [currentSessId]: [...(prev[currentSessId] || []), newUserMsg, initialAsstMsg],
+    }));
 
     setIsStreaming(true);
+    setFallbackNotice(null);
     abortControllerRef.current = new AbortController();
+    setTimeout(() => scrollToBottom("smooth"), 50);
 
     try {
-      const historyPayload = currentMessages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      let customEndpoint = undefined;
+      if (selectedModel === "hosted-cloud-llm" && typeof window !== "undefined") {
+        customEndpoint = localStorage.getItem("custom_llm_endpoint_url") || undefined;
+      }
 
-      const filesPayload = activeFiles.map((f) => ({
-        name: f.name,
-        type: f.type,
-        data: f.data,
-      }));
-
-      const res = await fetch("/api/chat", {
+      const response = await fetch(`${API_BASE}/api/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...getAuthHeaders(),
+        },
         body: JSON.stringify({
-          message: text,
-          history: historyPayload,
-          files: filesPayload,
+          prompt: userText,
+          message: userText,
+          // Send both model_id (new) and model (legacy) for maximum compatibility
+          model_id: selectedModel,
+          model: selectedModel,
+          sessionId: currentSessId,
+          customEndpoint,
+          documentId: attachedDocForMessage?.id,
+          imageUrl: attachedDocForMessage?.imageDataUrl,
+          messages: (sessionMessages[currentSessId] || []).slice(-6).map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
         }),
         signal: abortControllerRef.current.signal,
       });
 
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => null);
-        throw new Error(errJson?.error || `Server responded with status ${res.status}`);
+      if (!response.ok) {
+        throw new Error(`Server returned status ${response.status}`);
       }
 
-      if (!res.body) throw new Error("No response body received.");
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let accumulatedContent = "";
+      let sseBuffer = "";
+      let metaParsed = false;
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let fullContent = "";
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split("\n");
+          // Retain any trailing partial line in the buffer
+          sseBuffer = lines.pop() || "";
 
-        const chunk = decoder.decode(value, { stream: true });
-        fullContent += chunk;
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data: ")) continue;
 
-        setSessionMessages((prev) => {
-          const list = prev[activeSessionId] || [];
-          return {
-            ...prev,
-            [activeSessionId]: list.map((m) =>
-              m.id === assistantMsgId ? { ...m, content: fullContent } : m
-            ),
-          };
-        });
+            const dataStr = trimmed.slice(6).trim();
+            if (dataStr === "[DONE]") {
+              break;
+            }
+
+            try {
+              const parsed = JSON.parse(dataStr);
+
+              // First event is always the metadata event
+              if (!metaParsed && parsed.model_used !== undefined) {
+                metaParsed = true;
+                setModelUsed(parsed.model_used || "");
+                if (parsed.fallback_triggered && parsed.original_model) {
+                  setFallbackNotice({
+                    original: parsed.original_model,
+                    used: parsed.model_used,
+                  });
+                }
+                continue; // don't render metadata as chat content
+              }
+
+              const chunkText = parsed.content || parsed.chunk;
+              if (parsed.error && !chunkText) {
+                accumulatedContent += `\n\n⚠️ **Service Notice**: ${parsed.error}\n\n`;
+                setSessionMessages((prev) => {
+                  const sessMsgs = prev[currentSessId] || [];
+                  const updated = sessMsgs.map((m) =>
+                    m.id === asstMsgId ? { ...m, content: accumulatedContent } : m
+                  );
+                  return { ...prev, [currentSessId]: updated };
+                });
+              } else if (chunkText) {
+                accumulatedContent += chunkText;
+                setSessionMessages((prev) => {
+                  const sessMsgs = prev[currentSessId] || [];
+                  const updated = sessMsgs.map((m) =>
+                    m.id === asstMsgId ? { ...m, content: accumulatedContent } : m
+                  );
+                  return { ...prev, [currentSessId]: updated };
+                });
+              }
+            } catch (e) {
+              // Ignore partial JSON parse errors
+            }
+          }
+        }
+
+        // If after streaming finished, no content was accumulated, display clean message
+        if (!accumulatedContent.trim()) {
+          setSessionMessages((prev) => {
+            const sessMsgs = prev[currentSessId] || [];
+            const updated = sessMsgs.map((m) =>
+              m.id === asstMsgId
+                ? {
+                    ...m,
+                    content:
+                      "⚠️ The inference service responded with an empty payload. Please verify your `GROQ_API_KEY` in `backend/.env` or try asking again.",
+                  }
+                : m
+            );
+            return { ...prev, [currentSessId]: updated };
+          });
+        }
       }
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") {
-        console.log("Stream stopped by user.");
-      } else {
-        const errStr =
-          err instanceof Error
-            ? `⚠️ Error: ${err.message}`
-            : "⚠️ An error occurred while generating response.";
-
+    } catch (err: any) {
+      if (err.name !== "AbortError") {
+        console.error("Chat streaming error:", err);
         setSessionMessages((prev) => {
-          const list = prev[activeSessionId] || [];
-          return {
-            ...prev,
-            [activeSessionId]: list.map((m) =>
-              m.id === assistantMsgId ? { ...m, content: errStr } : m
-            ),
-          };
+          const sessMsgs = prev[currentSessId] || [];
+          const updated = sessMsgs.map((m) =>
+            m.id === asstMsgId
+              ? {
+                  ...m,
+                  content:
+                    "⚠️ Connection to backend service failed. Please make sure the FastAPI server is running with `uvicorn main:app --reload` on port 8000.",
+                }
+              : m
+          );
+          return { ...prev, [currentSessId]: updated };
         });
       }
     } finally {
@@ -325,277 +494,265 @@ export default function ChatPage() {
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
+  const handleStopStreaming = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      setIsStreaming(false);
     }
   };
 
   return (
-    <div className="flex h-screen w-full bg-[#1b1b1b] text-gray-100 overflow-hidden font-sans">
-      {/* Sidebar */}
+    <div className="flex h-screen w-full bg-[#131315] text-zinc-100 overflow-hidden font-sans">
+      {/* Sidebar Component */}
       <AppSidebar
         isOpen={sidebarOpen}
-        onToggle={() => setSidebarOpen((prev) => !prev)}
+        onToggle={() => setSidebarOpen(!sidebarOpen)}
         sessions={sessions}
         activeSessionId={activeSessionId}
-        onSelectSession={setActiveSessionId}
-        onNewChat={createNewChat}
-        onDeleteSession={deleteChat}
+        onSelectSession={(id) => {
+          setActiveSessionId(id);
+          fetchSessionMessages(id);
+        }}
+        onNewChat={createNewSession}
+        onDeleteSession={handleDeleteSession}
+        onOpenProfile={() => setIsProfileOpen(true)}
       />
 
-      {/* Main Chat Interface */}
-      <main className="flex-1 flex flex-col h-full min-w-0 bg-[#212121] relative">
-        {/* Header Bar */}
-        <header className="flex items-center justify-between h-14 px-4 border-b border-white/10 bg-[#212121]/90 backdrop-blur shrink-0 z-10">
+      {/* Main Chat Workspace */}
+      <div className="flex flex-col flex-1 h-full min-w-0 relative">
+        {/* Top Navigation Bar */}
+        <header className="h-14 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md px-4 flex items-center justify-between z-20">
           <div className="flex items-center gap-3">
             {!sidebarOpen && (
               <button
                 onClick={() => setSidebarOpen(true)}
-                className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
                 title="Open Sidebar"
               >
-                <PanelLeft size={20} />
+                <PanelLeft size={18} />
               </button>
             )}
-            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 font-medium">
-              <Sparkles size={14} className="text-emerald-400" />
-              <span>Gemini 3.6 Multimodal</span>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-sm text-zinc-100">OmniAI Doubt Solver</span>
+              <span className="hidden sm:inline-flex text-[11px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800/50">
+                100% Free Open-Source
+              </span>
             </div>
           </div>
 
-          <button
-            onClick={createNewChat}
-            className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
-            title="New Chat"
-          >
-            <Plus size={20} />
-          </button>
+          {/* Model Selector — fetches live list from /api/models */}
+          <div className="flex items-center gap-2">
+            {/* Active model pill */}
+            {modelUsed && (
+              <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                {modelUsed}
+              </span>
+            )}
+            <ModelSwitcher
+              selectedModelId={selectedModel}
+              onModelChange={(modelId) => setSelectedModel(modelId)}
+              userId={user?.id}
+            />
+          </div>
         </header>
 
-        {/* Message View Area */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6 scroll-smooth">
-          {currentMessages.length === 0 ? (
-            <div className="max-w-2xl mx-auto h-full flex flex-col items-center justify-center text-center py-12 px-4">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white mb-6 shadow-xl shadow-emerald-950/40">
-                <Bot size={36} />
-              </div>
-              <h1 className="text-2xl md:text-3xl font-bold text-white mb-2">
-                Chat & Multimodal Document Intelligence
-              </h1>
-              <p className="text-gray-400 text-sm mb-8 max-w-lg leading-relaxed">
-                Upload PDFs, documents, or images to analyze formulas, summarize content, and clear instant doubts powered by Gemini 3.6.
-              </p>
+        {/* Message Thread Scroll Area */}
+        <div
+          ref={messagesContainerRef}
+          className="flex-1 overflow-y-auto px-4 py-6"
+        >
+          <div className="max-w-4xl mx-auto space-y-6">
+            {/* Interactive Document / Image Doubt Preview Card (If file attached) */}
+            <DocumentPreviewCard
+              document={activeDocument}
+              onRemove={() => setActiveDocument(null)}
+              onAskContextDoubt={(query) => handleSendMessage(query)}
+              onImageLoad={() => scrollToBottom("smooth")}
+              isStreaming={isStreaming}
+            />
 
-              {/* Upload Drop Zone / Quick Upload Prompt */}
-              <div className="w-full max-w-xl p-6 rounded-2xl border-2 border-dashed border-white/15 bg-white/5 hover:bg-white/10 transition-all flex flex-col items-center justify-center cursor-pointer mb-8 group"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip size={32} className="text-emerald-400 mb-2 group-hover:scale-110 transition-transform" />
-                <span className="text-sm font-semibold text-white">Click or drag & drop files here</span>
-                <span className="text-xs text-gray-400 mt-1">Supports PDFs, PNG, JPG, TXT, and Markdown files</span>
-              </div>
-            </div>
-          ) : (
-            <div className="max-w-3xl mx-auto space-y-6 pb-6">
-              {currentMessages.map((msg, idx) => {
-                const isUser = msg.role === "user";
-                const isLastAssistant = !isUser && idx === currentMessages.length - 1 && isStreaming;
+            {/* Empty State / Welcome Hero */}
+            {currentMessages.length === 0 && (
+              <div className="py-8 flex flex-col items-center justify-center text-center">
+                <div className="h-16 w-16 rounded-2xl bg-gradient-to-tr from-emerald-500 via-teal-500 to-indigo-600 flex items-center justify-center text-white shadow-xl shadow-emerald-950/60 mb-4">
+                  <Sparkles size={32} />
+                </div>
+                <h1 className="text-2xl font-bold text-zinc-100 tracking-tight">
+                  What doubt can we solve today?
+                </h1>
+                <p className="text-sm text-zinc-400 max-w-lg mt-2 leading-relaxed">
+                  Ask any math, physics, coding, or academic doubt. Upload documents, snap photos of handwritten notes, or record your voice.
+                </p>
 
-                return (
+                {/* Quick Academic Doubt Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-2xl mt-8 text-left">
+                  {QUICK_DOUBT_TEMPLATES.map((tpl, idx) => {
+                    const Icon = tpl.icon;
+                    return (
+                      <button
+                        key={idx}
+                        onClick={() => handleSendMessage(tpl.prompt)}
+                        className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 hover:border-emerald-500/50 hover:bg-zinc-900 transition-all text-xs group"
+                      >
+                        <div className="flex items-center gap-2 font-semibold text-zinc-200 group-hover:text-emerald-400 mb-1">
+                          <Icon size={16} className="text-emerald-400" />
+                          <span>{tpl.title}</span>
+                        </div>
+                        <p className="text-zinc-400 text-[11px] line-clamp-2">
+                          {tpl.prompt}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Messages List */}
+            {currentMessages.map((message) => {
+              const isUser = message.role === "user";
+
+              return (
+                <div
+                  key={message.id}
+                  className={`flex gap-3.5 ${isUser ? "justify-end" : "justify-start"}`}
+                >
+                  {!isUser && (
+                    <div className="h-8 w-8 rounded-xl bg-emerald-950/80 border border-emerald-700/60 flex items-center justify-center text-emerald-400 flex-shrink-0 mt-1 shadow-md">
+                      <Bot size={17} />
+                    </div>
+                  )}
+
                   <div
-                    key={msg.id}
-                    className={`flex items-start gap-4 p-4 rounded-2xl transition-colors ${
+                    className={`rounded-2xl px-5 py-4 max-w-[88%] shadow-md ${
                       isUser
-                        ? "bg-white/5 border border-white/10 max-w-[88%] ml-auto"
-                        : "bg-transparent w-full"
+                        ? "bg-zinc-800 text-zinc-100 border border-zinc-700/60 rounded-tr-sm"
+                        : "bg-zinc-900/90 text-zinc-200 border border-zinc-800 rounded-tl-sm w-full"
                     }`}
                   >
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                        isUser
-                          ? "bg-indigo-600 text-white"
-                          : "bg-emerald-600 text-white shadow-md shadow-emerald-900/30"
-                      }`}
-                    >
-                      {isUser ? <User size={18} /> : <Bot size={18} />}
-                    </div>
-
-                    <div className="flex-1 min-w-0 space-y-2">
-                      <div className="text-xs font-semibold text-gray-400">
-                        {isUser ? "You" : "Gemini 3.6"}
-                      </div>
-
-                      {/* Display attached files if any */}
-                      {msg.files && msg.files.length > 0 && (
-                        <div className="flex flex-wrap gap-2 py-1">
-                          {msg.files.map((file) => (
-                            <div
-                              key={file.id}
-                              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium"
-                            >
-                              {file.previewUrl ? (
-                                <img
-                                  src={file.previewUrl}
-                                  alt={file.name}
-                                  className="w-6 h-6 object-cover rounded"
-                                />
+                    {isUser ? (
+                      <div className="space-y-2">
+                        {message.files && message.files.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mb-2">
+                            {message.files.map((f: any, fIdx: number) => {
+                              const isImg = f.fileType === "image" || f.imageDataUrl;
+                              return isImg && f.imageDataUrl ? (
+                                <div
+                                  key={fIdx}
+                                  className="relative rounded-xl overflow-hidden border border-zinc-700/80 max-w-xs max-h-56 bg-black/50 shadow-md"
+                                >
+                                  <img
+                                    src={f.imageDataUrl}
+                                    alt={f.filename || "Attached photo doubt"}
+                                    className="max-h-56 w-auto object-contain rounded-lg"
+                                    onLoad={() => scrollToBottom("smooth")}
+                                  />
+                                </div>
                               ) : (
-                                <FileText size={16} className="text-emerald-400" />
-                              )}
-                              <span className="truncate max-w-[150px]">{file.name}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {msg.content ? (
-                        <div className="relative">
-                          <MarkdownRenderer content={msg.content} />
-                          {isLastAssistant && (
-                            <span className="inline-block w-2 h-4 ml-1 bg-emerald-400 animate-pulse align-middle" />
-                          )}
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2 text-gray-400 text-sm py-2">
-                          <Loader2 size={16} className="animate-spin text-emerald-400" />
-                          <span>Analyzing content with Gemini 3.6...</span>
-                        </div>
-                      )}
-                    </div>
+                                <div
+                                  key={fIdx}
+                                  className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-zinc-900/90 border border-emerald-500/40 text-xs shadow-md"
+                                >
+                                  <FileText size={16} className="text-emerald-400 flex-shrink-0" />
+                                  <div className="min-w-0">
+                                    <p className="font-semibold text-zinc-100 truncate max-w-[200px]">
+                                      {f.filename}
+                                    </p>
+                                    <p className="text-[10px] text-zinc-400">
+                                      {f.fileType?.toUpperCase()} • {f.fileSize ? `${Math.max(1, Math.round(f.fileSize / 1024))} KB` : ""}
+                                    </p>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                          {message.content}
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <VisualRenderer content={message.content} />
+                        {isStreaming && message.id === currentMessages[currentMessages.length - 1].id && (
+                          <span className="inline-block h-4 w-1.5 bg-emerald-400 ml-1 align-middle animate-blink" />
+                        )}
+                      </>
+                    )}
                   </div>
-                );
-              })}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
 
-        {/* Document Doubt Clarification Bar (Context Aware) */}
-        {attachedFiles.length > 0 && (
-          <div className="w-full max-w-3xl mx-auto px-4 mb-2">
-            <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/30 backdrop-blur shadow-lg space-y-2">
-              <div className="flex items-center justify-between text-xs text-emerald-300 font-semibold">
-                <div className="flex items-center gap-1.5">
-                  <HelpCircle size={14} className="text-emerald-400" />
-                  <span>Clarify Doubts on Attached File ({attachedFiles.length})</span>
+                  {isUser && (
+                    <div className="h-8 w-8 rounded-xl bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300 flex-shrink-0 mt-1">
+                      <UserIcon size={17} />
+                    </div>
+                  )}
                 </div>
+              );
+            })}
+
+            {/* Stop Generation Button when streaming */}
+            {isStreaming && (
+              <div className="flex justify-center sticky bottom-2">
                 <button
-                  onClick={() => setAttachedFiles([])}
-                  className="text-gray-400 hover:text-white text-[11px]"
+                  onClick={handleStopStreaming}
+                  className="flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-900/90 hover:bg-zinc-800 text-xs font-medium text-zinc-300 border border-zinc-700 shadow-xl backdrop-blur-md transition-all"
                 >
-                  Clear Files
+                  <Square size={13} className="fill-red-400 text-red-400" />
+                  <span>Stop generating</span>
                 </button>
               </div>
+            )}
 
-              {/* Doubt Chips */}
-              <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-                {DOUBT_CHIPS.map((chip, idx) => {
-                  const ChipIcon = chip.icon;
-                  return (
-                    <button
-                      key={idx}
-                      onClick={() => handleSendMessage(chip.prompt)}
-                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 text-xs font-medium shrink-0 transition-colors border border-emerald-500/20"
-                    >
-                      <ChipIcon size={12} className="text-emerald-300" />
-                      <span>{chip.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {/* Fallback notice — shown when backend switched to a different model */}
+        {fallbackNotice && (
+          <div className="px-4 pb-1">
+            <div className="max-w-4xl mx-auto flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-amber-950/50 border border-amber-700/40 text-xs text-amber-300">
+              <span>
+                <span className="font-semibold">⚠️ Model switched:</span>{" "}
+                <span className="font-mono text-amber-400">{fallbackNotice.original}</span> was unavailable — responded with{" "}
+                <span className="font-mono text-emerald-400">{fallbackNotice.used}</span> instead.
+              </span>
+              <button
+                onClick={() => setFallbackNotice(null)}
+                className="text-amber-500 hover:text-amber-300 transition-colors ml-2 shrink-0"
+                title="Dismiss"
+              >
+                ✕
+              </button>
             </div>
           </div>
         )}
 
-        {/* Hidden File Input */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept="image/png,image/jpeg,image/webp,application/pdf,text/plain,text/markdown"
-          onChange={handleFileUpload}
-          className="hidden"
+        {/* ChatGPT-Style Unified Multimodal Input Bar */}
+        <ChatInputBar
+          onSendMessage={handleSendMessage}
+          onFileUpload={handleFileUpload}
+          onOpenCamera={() => setIsCameraOpen(true)}
+          attachedDocument={activeDocument}
+          onRemoveAttachment={() => setActiveDocument(null)}
+          isStreaming={isStreaming}
         />
+      </div>
 
-        {/* Input Bar Area */}
-        <div className="w-full max-w-3xl mx-auto px-4 pb-4">
-          {/* File Attachment Previews */}
-          {attachedFiles.length > 0 && (
-            <div className="flex flex-wrap gap-2 p-2 bg-[#2a2a2a] rounded-t-xl border-t border-x border-white/10">
-              {attachedFiles.map((file) => (
-                <div
-                  key={file.id}
-                  className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs px-3 py-1.5 rounded-lg"
-                >
-                  {file.previewUrl ? (
-                    <img src={file.previewUrl} alt={file.name} className="w-5 h-5 object-cover rounded" />
-                  ) : (
-                    <FileText size={14} />
-                  )}
-                  <span className="truncate max-w-[140px] font-medium">{file.name}</span>
-                  <button
-                    onClick={() => removeAttachedFile(file.id)}
-                    className="p-0.5 hover:text-white text-emerald-400"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+      {/* Webcam Photo Snapshot Capture Modal */}
+      <CameraModal
+        isOpen={isCameraOpen}
+        onClose={() => setIsCameraOpen(false)}
+        onCapture={handleCameraCapture}
+      />
 
-          <div className="relative bg-[#2f2f2f] rounded-2xl border border-white/10 shadow-xl focus-within:border-white/20 transition-all">
-            <textarea
-              ref={textareaRef}
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask anything or clarify doubts about your files..."
-              rows={1}
-              className="w-full bg-transparent text-white placeholder-gray-400 px-4 py-3.5 pr-24 focus:outline-none resize-none text-sm max-h-48 overflow-y-auto"
-            />
-
-            <div className="absolute right-2.5 bottom-2.5 flex items-center gap-1.5">
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
-                title="Attach Document or Image"
-              >
-                <Paperclip size={18} />
-              </button>
-
-              {isStreaming ? (
-                <button
-                  onClick={stopGeneration}
-                  className="p-2 rounded-lg bg-white text-black hover:bg-gray-200 transition-colors"
-                  title="Stop generating"
-                >
-                  <Square size={16} className="fill-black" />
-                </button>
-              ) : (
-                <button
-                  onClick={() => handleSendMessage()}
-                  disabled={!inputMessage.trim() && attachedFiles.length === 0}
-                  className={`p-2 rounded-lg transition-colors ${
-                    inputMessage.trim() || attachedFiles.length > 0
-                      ? "bg-emerald-500 text-white hover:bg-emerald-600 shadow-md shadow-emerald-950/30"
-                      : "bg-white/10 text-gray-500 cursor-not-allowed"
-                  }`}
-                  title="Send Message"
-                >
-                  <Send size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className="text-[11px] text-center text-gray-500 mt-2">
-            Gemini 3.6 Multimodal AI • Check important file data.
-          </div>
-        </div>
-      </main>
+      {/* User Profile & Chat Export Modal */}
+      <UserProfileModal
+        isOpen={isProfileOpen}
+        onClose={() => setIsProfileOpen(false)}
+        currentUser={user}
+        onLogout={logout}
+      />
     </div>
   );
 }
