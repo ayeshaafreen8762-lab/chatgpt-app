@@ -34,14 +34,21 @@ app = FastAPI(
 # Robust CORS Configuration
 raw_origins = os.getenv("ALLOWED_ORIGINS") or os.getenv("FRONTEND_URL") or "http://localhost:3000,http://127.0.0.1:3000"
 allowed_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
-for default_origin in ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001"]:
+# Always include local dev + Firebase production hosting URLs
+for default_origin in [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "https://chatgpt-app-1c53a.web.app",
+    "https://chatgpt-app-1c53a.firebaseapp.com",
+]:
     if default_origin not in allowed_origins:
         allowed_origins.append(default_origin)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],          # wildcard covers any future domain; credentials still work per-origin
+    allow_credentials=False,      # must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
