@@ -32,7 +32,7 @@ export interface Message {
   files?: any[];
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "";
 
 const QUICK_DOUBT_TEMPLATES = [
   {
@@ -60,17 +60,27 @@ const QUICK_DOUBT_TEMPLATES = [
 export default function ChatPage() {
   const { user, getAuthHeaders, isAuthenticated, logout } = useAuth();
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // On desktop, open sidebar by default; keep closed on mobile
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setSidebarOpen(window.innerWidth >= 768);
+    }
+  }, []);
   // Default model is loaded from localStorage (scoped per user) after mount
   const [selectedModel, setSelectedModel] = useState("groq/compound");
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionMessages, setSessionMessages] = useState<Record<string, Message[]>>({});
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isSlowConnection, setIsSlowConnection] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [activeDocument, setActiveDocument] = useState<AttachedDoc | null>(null);
   // Fallback notice: shown when the backend switched to a different model
   const [fallbackNotice, setFallbackNotice] = useState<{ original: string; used: string } | null>(null);
   const [modelUsed, setModelUsed] = useState<string>("");
+  const slowConnectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Modals
   const [isCameraOpen, setIsCameraOpen] = useState(false);
@@ -349,9 +359,16 @@ export default function ChatPage() {
     }));
 
     setIsStreaming(true);
+    setIsSlowConnection(false);
+    setConnectionError(null);
     setFallbackNotice(null);
     abortControllerRef.current = new AbortController();
     setTimeout(() => scrollToBottom("smooth"), 50);
+
+    // Show "waking up server" banner if response takes > 5s (Render free-tier cold start)
+    slowConnectionTimerRef.current = setTimeout(() => {
+      setIsSlowConnection(true);
+    }, 5000);
 
     try {
       let customEndpoint = undefined;
@@ -474,15 +491,16 @@ export default function ChatPage() {
     } catch (err: any) {
       if (err.name !== "AbortError") {
         console.error("Chat streaming error:", err);
+        const isNetworkErr = err.message?.includes("Failed to fetch") || err.message?.includes("NetworkError") || err.message?.includes("ECONNREFUSED");
+        const friendlyMsg = isNetworkErr
+          ? "🔌 Having trouble connecting — the server may still be waking up. Please try again in a moment."
+          : `⚠️ Something went wrong: ${err.message || "Unknown error"}. Please try again.`;
+        setConnectionError(friendlyMsg);
         setSessionMessages((prev) => {
           const sessMsgs = prev[currentSessId] || [];
           const updated = sessMsgs.map((m) =>
             m.id === asstMsgId
-              ? {
-                  ...m,
-                  content:
-                    "⚠️ Connection to backend service failed. Please make sure the FastAPI server is running with `uvicorn main:app --reload` on port 8000.",
-                }
+              ? { ...m, content: friendlyMsg }
               : m
           );
           return { ...prev, [currentSessId]: updated };
@@ -490,6 +508,11 @@ export default function ChatPage() {
       }
     } finally {
       setIsStreaming(false);
+      setIsSlowConnection(false);
+      if (slowConnectionTimerRef.current) {
+        clearTimeout(slowConnectionTimerRef.current);
+        slowConnectionTimerRef.current = null;
+      }
       abortControllerRef.current = null;
     }
   };
@@ -502,7 +525,7 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex h-screen w-full bg-[#131315] text-zinc-100 overflow-hidden font-sans">
+    <div className="flex h-[100dvh] w-full bg-[#131315] text-zinc-100 overflow-hidden font-sans">
       {/* Sidebar Component */}
       <AppSidebar
         isOpen={sidebarOpen}
@@ -519,14 +542,22 @@ export default function ChatPage() {
       />
 
       {/* Main Chat Workspace */}
-      <div className="flex flex-col flex-1 h-full min-w-0 relative">
+      <div className="flex flex-col flex-1 h-full min-w-0 relative overflow-hidden">
         {/* Top Navigation Bar */}
         <header className="h-14 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md px-4 flex items-center justify-between z-20">
           <div className="flex items-center gap-3">
+            {/* Always show on mobile; only show on desktop when sidebar is closed */}
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors md:hidden min-w-[44px] min-h-[44px] flex items-center justify-center"
+              title="Toggle Sidebar"
+            >
+              <PanelLeft size={18} />
+            </button>
             {!sidebarOpen && (
               <button
                 onClick={() => setSidebarOpen(true)}
-                className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                className="hidden md:flex p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
                 title="Open Sidebar"
               >
                 <PanelLeft size={18} />
@@ -539,6 +570,7 @@ export default function ChatPage() {
               </span>
             </div>
           </div>
+
 
           {/* Model Selector — fetches live list from /api/models */}
           <div className="flex items-center gap-2">
@@ -625,7 +657,7 @@ export default function ChatPage() {
                   )}
 
                   <div
-                    className={`rounded-2xl px-5 py-4 max-w-[88%] shadow-md ${
+                    className={`rounded-2xl px-4 py-3 sm:px-5 sm:py-4 max-w-[92%] sm:max-w-[88%] shadow-md ${
                       isUser
                         ? "bg-zinc-800 text-zinc-100 border border-zinc-700/60 rounded-tr-sm"
                         : "bg-zinc-900/90 text-zinc-200 border border-zinc-800 rounded-tl-sm w-full"
@@ -707,6 +739,38 @@ export default function ChatPage() {
             <div ref={messagesEndRef} />
           </div>
         </div>
+
+        {/* Slow connection / cold-start banner */}
+        {isSlowConnection && isStreaming && (
+          <div className="px-4 pb-1">
+            <div className="max-w-4xl mx-auto flex items-center gap-3 px-4 py-3 rounded-xl bg-blue-950/60 border border-blue-700/40 text-xs text-blue-200 animate-pulse">
+              <svg className="w-4 h-4 text-blue-400 flex-shrink-0 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <span>
+                <span className="font-semibold">Waking up the server…</span>{" "}
+                The free-tier backend spins down after 15 min of inactivity. First response may take 20–40 seconds. Please hang tight!
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Connection error banner */}
+        {connectionError && !isStreaming && (
+          <div className="px-4 pb-1">
+            <div className="max-w-4xl mx-auto flex items-center justify-between gap-2 px-4 py-3 rounded-xl bg-red-950/50 border border-red-700/40 text-xs text-red-300">
+              <span>{connectionError}</span>
+              <button
+                onClick={() => setConnectionError(null)}
+                className="text-red-500 hover:text-red-300 transition-colors ml-2 shrink-0"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Fallback notice — shown when backend switched to a different model */}
         {fallbackNotice && (

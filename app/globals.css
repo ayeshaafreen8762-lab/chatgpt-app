@@ -64,3 +64,40 @@ body {
   padding: 0.75rem 0;
   margin: 0.5rem 0 !important;
 }
+
+/* Mobile: tables scroll horizontally instead of breaking layout */
+.prose table,
+.markdown-content table {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Minimum 44x44px touch targets for interactive elements */
+button, a, [role="button"] {
+  min-height: 44px;
+  min-width: 44px;
+}
+/* But allow small inline icon buttons to override */
+.btn-icon-sm {
+  min-height: 28px;
+  min-width: 28px;
+}
+
+/* Chat bubble text wrapping on mobile */
+.chat-bubble {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Prevent horizontal overflow on mobile */
+@media (max-width: 640px) {
+  pre {
+    overflow-x: auto;
+    max-width: calc(100vw - 2rem);
+  }
+  .max-w-4xl {
+    max-width: 100%;
+  }
+}

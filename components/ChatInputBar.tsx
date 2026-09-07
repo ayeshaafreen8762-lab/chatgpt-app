@@ -100,7 +100,7 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = ({
   };
 
   return (
-    <div className="w-full max-w-4xl mx-auto px-4 pb-4">
+    <div className="w-full max-w-4xl mx-auto px-2 sm:px-4 pb-3 sm:pb-4">
       {/* Hidden File Input (Accepts ANY file) */}
       <input
         type="file"
@@ -239,8 +239,8 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = ({
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask any math, physics, or coding doubt (e.g., 'Derive Schrödinger wave equation', 'Graph quadratic root')..."
-            className="w-full max-h-[200px] resize-none bg-transparent border-0 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-0 leading-relaxed py-1.5"
+            placeholder="Ask any doubt..."
+            className="w-full max-h-[200px] resize-none bg-transparent border-0 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-0 leading-relaxed py-1.5 min-w-0"
           />
 
           {/* Microphone Voice Button */}
