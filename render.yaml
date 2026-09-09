@@ -1,4 +1,13 @@
 # Render Blueprint Specification for FastAPI Backend
+#
+# IMPORTANT: GROQ_API_KEY must be set manually in the Render Dashboard
+# because GitHub secret scanning blocks pushing real API keys in plaintext.
+#
+# Steps to set it:
+# 1. Go to https://dashboard.render.com
+# 2. Open the "omniai-backend" service → Environment tab
+# 3. Add GROQ_API_KEY = <your gsk_... key>
+# 4. Click "Save Changes" — Render auto-redeploys.
 services:
   - type: web
     name: omniai-backend
@@ -8,4 +17,16 @@ services:
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: "3.11.9"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "10080"
+      - key: DATABASE_URL
+        value: sqlite:///./omni_ai.db
+      - key: ALLOWED_ORIGINS
+        value: "http://localhost:3000,http://127.0.0.1:3000,https://chatgpt-app-1c53a.web.app,https://chatgpt-app-1c53a.firebaseapp.com"

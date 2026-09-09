@@ -27,7 +27,9 @@ export interface AIModel {
   endpointUrl?: string;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+import { getBackendUrl } from "@/lib/config";
+
+const API_BASE = getBackendUrl();
 
 function makeStorageKey(userId?: number | string | null): string {
   // Scoped per user when available; falls back to a generic key

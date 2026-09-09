@@ -6,8 +6,28 @@
   --foreground: #f3f4f6;
   --sidebar-bg: #1c1c1f;
   --input-bg: #222226;
+  --card-bg: #18181b;
   --accent-primary: #10b981;
   --accent-glow: rgba(16, 185, 129, 0.15);
+}
+
+html.light {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --sidebar-bg: #f1f5f9;
+  --input-bg: #ffffff;
+  --card-bg: #ffffff;
+  --accent-primary: #059669;
+  --accent-glow: rgba(5, 150, 105, 0.15);
+}
+
+html.light body {
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+html.light .katex {
+  color: #0f172a;
 }
 
 @theme inline {
@@ -45,8 +65,15 @@ body {
 
 /* Animations */
 @keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0;
+  }
 }
 
 .animate-blink {
@@ -58,6 +85,7 @@ body {
   font-size: 1.1em;
   color: #f3f4f6;
 }
+
 .katex-display {
   overflow-x: auto;
   overflow-y: hidden;
@@ -75,10 +103,13 @@ body {
 }
 
 /* Minimum 44x44px touch targets for interactive elements */
-button, a, [role="button"] {
+button,
+a,
+[role="button"] {
   min-height: 44px;
   min-width: 44px;
 }
+
 /* But allow small inline icon buttons to override */
 .btn-icon-sm {
   min-height: 28px;
@@ -97,6 +128,7 @@ button, a, [role="button"] {
     overflow-x: auto;
     max-width: calc(100vw - 2rem);
   }
+
   .max-w-4xl {
     max-width: 100%;
   }

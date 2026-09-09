@@ -68,7 +68,10 @@ def get_groq_key() -> str:
     """
     if _DOTENV_PATH:
         load_dotenv(_DOTENV_PATH, override=True)
-    return os.getenv("GROQ_API_KEY", "").strip()
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    prefix = key[:6] if key else "(none)"
+    print(f"[DEBUG GROQ_API_KEY] loaded prefix: '{prefix}' | length: {len(key)}")
+    return key
 
 
 def is_valid_key(key: str) -> bool:
@@ -165,11 +168,16 @@ async def stream_groq_chat(
 
     # --- Key validation ---
     if not is_valid_key(api_key):
+        key_prefix = api_key[:8] + "..." if api_key else "(empty)"
+        print(f"[ERROR] GROQ_API_KEY is missing or invalid on this deployment. Loaded key prefix: '{key_prefix}'. Set GROQ_API_KEY in Render environment variables.")
         msg = (
-            "⚠️ **Groq API Key Missing or Invalid**\n\n"
-            "Add your free key to `backend/.env`:\n"
-            "```env\nGROQ_API_KEY=gsk_...\n```\n"
-            "Get one free at [console.groq.com/keys](https://console.groq.com/keys)."
+            "⚠️ **AI Service Configuration Error**\n\n"
+            "The AI backend is missing its API key configuration. "
+            "The server administrator needs to set `GROQ_API_KEY` in the Render deployment environment variables.\n\n"
+            "**Loaded key prefix**: `" + key_prefix + "`\n\n"
+            "This is a server configuration issue — not something you can fix. "
+            "Please contact the app administrator or wait for a fix.\n\n"
+            "Free Groq keys available at [console.groq.com/keys](https://console.groq.com/keys)."
         )
         yield _build_error_sse(msg, "MISSING_API_KEY")
         yield "data: [DONE]\n\n"
@@ -223,13 +231,15 @@ async def stream_groq_chat(
                     raw = (await resp.aread()).decode("utf-8", errors="ignore")
 
                     if resp.status_code == 401:
+                        key_prefix = api_key[:8] + "..." if api_key else "(empty)"
+                        print(f"[ERROR] Groq 401 Unauthorized. The deployed GROQ_API_KEY was rejected. Prefix: '{key_prefix}'. Update GROQ_API_KEY in Render environment.")
                         msg = (
-                            "⚠️ **Groq API Key Invalid (401 Unauthorized)**\n\n"
-                            "Your key was rejected by Groq. Steps to fix:\n"
-                            "1. Visit [console.groq.com/keys](https://console.groq.com/keys) and generate a new key.\n"
-                            "2. Open `backend/.env` and replace the value:\n"
-                            "   ```env\n   GROQ_API_KEY=gsk_your_new_key_here\n   ```\n"
-                            "3. Save the file — uvicorn will pick it up automatically on the next message."
+                            "⚠️ **AI Service Authentication Error (401)**\n\n"
+                            "The Groq API key configured on this server was rejected. "
+                            "The API key needs to be updated in the Render deployment environment variables.\n\n"
+                            f"**Key prefix used**: `{key_prefix}`\n\n"
+                            "Please contact the app administrator. "
+                            "New keys can be generated at [console.groq.com/keys](https://console.groq.com/keys)."
                         )
                         yield _build_error_sse(msg, "INVALID_API_KEY_401")
 

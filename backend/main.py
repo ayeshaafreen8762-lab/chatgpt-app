@@ -47,8 +47,9 @@ for default_origin in [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # wildcard covers any future domain; credentials still work per-origin
-    allow_credentials=False,      # must be False when allow_origins=["*"]
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https://chatgpt-app-1c53a\.(web|firebaseapp)\.app|http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -99,6 +100,8 @@ class CreateSessionRequest(BaseModel):
 
 # System Endpoints
 @app.get("/")
+@app.get("/health")
+@app.get("/api/health")
 def read_root():
     return {
         "status": "online",

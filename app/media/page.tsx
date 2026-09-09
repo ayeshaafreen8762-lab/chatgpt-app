@@ -52,8 +52,10 @@ export interface GeneratedMediaItem {
   createdAt: number;
 }
 
+import { getBackendUrl, DEFAULT_MODEL_ID } from "@/lib/config";
+
 const LOCAL_STORAGE_MODEL_KEY = "omni_ai_selected_model";
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const API_BASE = getBackendUrl();
 
 export default function MediaStudioPage() {
   const { getAuthHeaders } = useAuth();
@@ -62,7 +64,7 @@ export default function MediaStudioPage() {
   const [prompt, setPrompt] = useState("");
   const [selectedStyle, setSelectedStyle] = useState("Cinematic");
   const [aspectRatio, setAspectRatio] = useState("16:9");
-  const [selectedModel, setSelectedModel] = useState("gemini-3.6-flash");
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL_ID);
   const [negativePrompt, setNegativePrompt] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [mediaGallery, setMediaGallery] = useState<GeneratedMediaItem[]>([]);
@@ -97,21 +99,38 @@ export default function MediaStudioPage() {
         customEndpoint = localStorage.getItem("custom_llm_endpoint_url") || undefined;
       }
 
-      const res = await fetch(`${API_BASE}/api/media`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          prompt,
-          style: selectedStyle,
-          aspectRatio,
-          model: selectedModel,
-          customEndpoint,
-          negativePrompt,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error("Media generation service error.");
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE}/api/media`, {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            prompt,
+            style: selectedStyle,
+            aspectRatio,
+            model: selectedModel,
+            customEndpoint,
+            negativePrompt,
+          }),
+        });
+        if (!res.ok) throw new Error("Media generation service error.");
+      } catch (directErr) {
+        console.warn("Direct media service unreachable, using fallback route:", directErr);
+        res = await fetch("/api/media", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            style: selectedStyle,
+            aspectRatio,
+            model: selectedModel,
+            customEndpoint,
+            negativePrompt,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error("Media generation service error.");
+        }
       }
 
       const data = await res.json();

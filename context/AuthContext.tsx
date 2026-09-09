@@ -23,9 +23,11 @@ interface AuthContextType {
   getAuthHeaders: () => Record<string, string>;
 }
 
+import { getBackendUrl } from "@/lib/config";
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const API_BASE = getBackendUrl();
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);

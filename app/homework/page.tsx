@@ -48,8 +48,10 @@ export interface AttachedAssignmentFile {
   size: number;
 }
 
+import { getBackendUrl, DEFAULT_MODEL_ID } from "@/lib/config";
+
 const LOCAL_STORAGE_MODEL_KEY = "omni_ai_selected_model";
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const API_BASE = getBackendUrl();
 
 export default function HomeworkPage() {
   const { getAuthHeaders } = useAuth();
@@ -57,7 +59,7 @@ export default function HomeworkPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [selectedSubject, setSelectedSubject] = useState("Mathematics");
   const [solutionFormat, setSolutionFormat] = useState("step-by-step");
-  const [selectedModel, setSelectedModel] = useState("gemini-3.6-flash");
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL_ID);
   const [problemText, setProblemText] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<AttachedAssignmentFile[]>([]);
   const [isSolving, setIsSolving] = useState(false);
@@ -122,18 +124,36 @@ export default function HomeworkPage() {
         customEndpoint = localStorage.getItem("custom_llm_endpoint_url") || undefined;
       }
 
-      const res = await fetch(`${API_BASE}/api/homework`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          subject: selectedSubject,
-          problemText,
-          solutionFormat,
-          model: selectedModel,
-          customEndpoint,
-          files: attachedFiles,
-        }),
-      });
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE}/api/homework`, {
+          method: "POST",
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            subject: selectedSubject,
+            problemText,
+            solutionFormat,
+            model: selectedModel,
+            customEndpoint,
+            files: attachedFiles,
+          }),
+        });
+        if (!res.ok) throw new Error(`Backend returned status ${res.status}`);
+      } catch (directErr) {
+        console.warn("Direct homework service unreachable, using fallback route:", directErr);
+        res = await fetch("/api/homework", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            subject: selectedSubject,
+            problemText,
+            solutionFormat,
+            model: selectedModel,
+            customEndpoint,
+            files: attachedFiles,
+          }),
+        });
+      }
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => null);

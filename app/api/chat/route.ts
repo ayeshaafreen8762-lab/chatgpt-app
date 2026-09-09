@@ -74,7 +74,80 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 3. Gemini API Direct Fallback Handler
+    // 3. Native Groq Streaming Direct Handler
+    const groqKey = process.env.GROQ_API_KEY;
+    const keyPrefix = groqKey ? groqKey.slice(0, 6) : "(none)";
+    console.log(`[DEBUG process.env.GROQ_API_KEY] loaded prefix: '${keyPrefix}' | length: ${groqKey ? groqKey.length : 0}`);
+    if (groqKey && (model.includes("llama") || model.includes("qwen") || model.includes("deepseek") || model.includes("groq") || !model.startsWith("gemini"))) {
+      try {
+        const groqModel = model === "groq/compound" ? "llama-3.3-70b-versatile" : (model.startsWith("groq/") ? "llama-3.3-70b-versatile" : model);
+        const groqMessages = (history || []).map((m: { role: string; content: string }) => ({
+          role: m.role === "human" ? "user" : m.role,
+          content: m.content,
+        }));
+        groqMessages.push({ role: "user", content: message });
+
+        const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${groqKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: groqModel,
+            messages: groqMessages,
+            temperature: 0.5,
+            stream: true,
+          }),
+        });
+
+        if (groqRes.ok && groqRes.body) {
+          const reader = groqRes.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          const encoder = new TextEncoder();
+          let sseBuf = "";
+
+          const groqStream = new ReadableStream({
+            async start(controller) {
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  sseBuf += decoder.decode(value, { stream: true });
+                  const lines = sseBuf.split("\n");
+                  sseBuf = lines.pop() || "";
+                  for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed || !trimmed.startsWith("data: ")) continue;
+                    const dataStr = trimmed.slice(6).trim();
+                    if (dataStr === "[DONE]") break;
+                    try {
+                      const parsed = JSON.parse(dataStr);
+                      const delta = parsed.choices?.[0]?.delta?.content;
+                      if (delta) controller.enqueue(encoder.encode(delta));
+                    } catch {}
+                  }
+                }
+                controller.close();
+              } catch (err) {
+                controller.error(err);
+              }
+            },
+          });
+
+          return new Response(groqStream, {
+            headers: {
+              "Content-Type": "text/plain; charset=utf-8",
+              "Cache-Control": "no-cache",
+            },
+          });
+        }
+      } catch (groqErr) {
+        console.warn("Direct Groq route failed, falling back to next provider:", groqErr);
+      }
+    }
+
+    // 4. Gemini API Direct Fallback Handler
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 
     if (apiKey && model.startsWith("gemini")) {

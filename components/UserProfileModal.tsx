@@ -52,7 +52,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     setStatusMsg(null);
 
     try {
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "";
       const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
 
       const res = await fetch(`${backendUrl}/api/auth/reset-password`, {
@@ -82,7 +82,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
   const handleExport = async (format: "json" | "markdown") => {
     try {
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "";
       const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
 
       const res = await fetch(`${backendUrl}/api/user/export?format=${format}`, {
