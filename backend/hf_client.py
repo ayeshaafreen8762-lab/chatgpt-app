@@ -24,10 +24,10 @@ _DOTENV_PATH = find_dotenv(usecwd=True)
 # Hugging Face Inference API endpoints
 # HF has transitioned chat completions to router.huggingface.co
 # ---------------------------------------------------------------------------
-HF_API_BASE = "https://router.huggingface.co/hf-inference/v1/chat/completions"
+HF_API_BASE = "https://router.huggingface.co/v1/chat/completions"
 HF_API_BASE_CANDIDATES = [
-    "https://router.huggingface.co/hf-inference/v1/chat/completions",
     "https://router.huggingface.co/v1/chat/completions",
+    "https://router.huggingface.co/hf-inference/v1/chat/completions",
     "https://api-inference.huggingface.co/v1/chat/completions",
 ]
 
@@ -186,19 +186,24 @@ async def stream_hf_chat(
     original_model: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
-    Live-streams Hugging Face Inference API response as SSE.
-
-    Yields:
-        data: {"sessionId": "...", "model_used": "...", "fallback_triggered": bool}  (first event)
-        data: {"content": "<delta>", "chunk": "<delta>"}                             (content events)
-        data: [DONE]                                                                  (final event)
-
-    On any error: yields a friendly SSE error message then [DONE].
+    Yields SSE-formatted lines:
+      First chunk : {"sessionId": ..., "model_used": ..., "fallback_triggered": ...}
+      Deltas      : {"content": "<str>", "chunk": "<str>"}
+      Error       : {"content": "<err_msg>", "chunk": "<err_msg>", "error": "<code>"}
+      End         : [DONE]
     """
-    # Re-read key fresh on every invocation
-    api_key = get_hf_key()
+    # Emit metadata event first
+    meta_event = {
+        "sessionId": f"sess_{os.urandom(6).hex()}",
+        "model_used": model_used or model,
+        "fallback_triggered": fallback_triggered,
+    }
+    if fallback_triggered and original_model:
+        meta_event["original_model"] = original_model
+    yield f"data: {json.dumps(meta_event)}\n\n"
 
-    # --- Key validation ---
+    # Read API key fresh per-request
+    api_key = get_hf_key()
     if not is_valid_hf_key(api_key):
         key_prefix = api_key[:8] + "..." if api_key else "(empty)"
         print(
@@ -271,10 +276,6 @@ async def stream_hf_chat(
 
                         if resp.status_code == 401:
                             key_prefix = api_key[:8] + "..." if api_key else "(empty)"
-                            print(
-                                f"[ERROR] HF 401 Unauthorized. The deployed HF_API_KEY was rejected. "
-                                f"Prefix: '{key_prefix}'. Update HF_API_KEY in Render environment."
-                            )
                             msg = (
                                 "⚠️ **AI Service Authentication Error (401)**\n\n"
                                 "The Hugging Face API token configured on this server was rejected. "
@@ -288,8 +289,8 @@ async def stream_hf_chat(
                             yield "data: [DONE]\n\n"
                             return
 
-                        elif resp.status_code == 404 and attempt_idx < len(candidate_urls) - 1:
-                            # Try next router URL
+                        elif (resp.status_code in (400, 404, 500, 502, 503) or "not supported by provider" in raw.lower()) and attempt_idx < len(candidate_urls) - 1:
+                            # Try next candidate endpoint
                             continue
 
                         elif resp.status_code == 429:
