@@ -2,7 +2,7 @@
 hf_client.py — OmniAI Hugging Face Inference API Streaming Client
 -----------------------------------------------------------------
 - Reads HF_API_KEY fresh on every request (no stale module-level cache)
-- Streams responses as SSE chunks via the HF Inference API
+- Streams responses as SSE chunks via huggingface_hub AsyncInferenceClient and HTTP router
 - Strips <think>…</think> reasoning blocks in-stream (for reasoning models)
 - Handles 401, 429, 503, timeout and network errors gracefully over SSE
 - Zero hardcoded mock responses; zero dead model references
@@ -15,6 +15,12 @@ from typing import AsyncGenerator, List, Dict, Any, Optional
 import httpx
 from dotenv import load_dotenv, find_dotenv
 
+try:
+    from huggingface_hub import AsyncInferenceClient
+    _HAS_HF_HUB = True
+except ImportError:
+    _HAS_HF_HUB = False
+
 # ---------------------------------------------------------------------------
 # Reload .env on module import
 # ---------------------------------------------------------------------------
@@ -22,7 +28,6 @@ _DOTENV_PATH = find_dotenv(usecwd=True)
 
 # ---------------------------------------------------------------------------
 # Hugging Face Inference API endpoints
-# HF has transitioned chat completions to router.huggingface.co
 # ---------------------------------------------------------------------------
 HF_API_BASE = "https://router.huggingface.co/v1/chat/completions"
 HF_API_BASE_CANDIDATES = [
@@ -37,12 +42,12 @@ HF_API_BASE_CANDIDATES = [
 MODEL_ID_MAP: Dict[str, str] = {
     "hf/mistral-7b-instruct":  "mistralai/Mistral-7B-Instruct-v0.3",
     "hf/mistral-nemo":         "mistralai/Mistral-Nemo-Instruct-2407",
-    "hf/llama-3-8b-instruct":  "meta-llama/Meta-Llama-3-8B-Instruct",
-    "hf/qwen2-7b-instruct":    "Qwen/Qwen2-7B-Instruct",
+    "hf/llama-3-8b-instruct":  "meta-llama/Llama-3.1-8B-Instruct",
+    "hf/qwen2-7b-instruct":    "Qwen/Qwen2.5-7B-Instruct",
 }
 
 # ---------------------------------------------------------------------------
-# System prompt (same as before — keep AI behaviour identical)
+# System prompt
 # ---------------------------------------------------------------------------
 SYSTEM_DOUBT_SOLVER_PROMPT = """You are OmniAI, a world-class Principal AI Tutor and Doubt Solver.
 Your goal is to solve academic, technical, scientific, and coding doubts with maximum clarity, intuitive pedagogy, and rich visual aids.
@@ -171,7 +176,7 @@ class _ThinkTagStripper:
 
 
 # ---------------------------------------------------------------------------
-# Main streaming function (drop-in replacement for stream_groq_chat)
+# Main streaming function
 # ---------------------------------------------------------------------------
 
 async def stream_hf_chat(
@@ -241,6 +246,48 @@ async def stream_hf_chat(
         else:
             payload_messages.append({"role": role, "content": content})
 
+    stripper = _ThinkTagStripper() if is_reasoning_model else None
+
+    # ── Method 1: Use official huggingface_hub AsyncInferenceClient ────────────
+    if _HAS_HF_HUB and not custom_endpoint:
+        try:
+            client = AsyncInferenceClient(token=api_key, timeout=90.0)
+            stream = await client.chat.completions.create(
+                model=effective_model,
+                messages=payload_messages,
+                temperature=0.4,
+                max_tokens=4096,
+                stream=True,
+            )
+            emitted_any = False
+            async for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        emitted_any = True
+                        if stripper is not None:
+                            delta = stripper.feed(delta)
+                        if delta:
+                            yield f"data: {json.dumps({'content': delta, 'chunk': delta})}\n\n"
+            if emitted_any:
+                yield "data: [DONE]\n\n"
+                return
+        except Exception as hub_err:
+            err_str = str(hub_err)
+            print(f"[WARN] AsyncInferenceClient exception: {err_str} — falling back to direct HTTP candidates")
+            if "401" in err_str or "unauthorized" in err_str.lower():
+                key_prefix = api_key[:8] + "..." if api_key else "(empty)"
+                msg = (
+                    "⚠️ **AI Service Authentication Error (401)**\n\n"
+                    "The Hugging Face API token configured on this server was rejected.\n\n"
+                    f"**Key prefix used**: `{key_prefix}`\n\n"
+                    "Please verify `HF_API_KEY` in Render environment settings."
+                )
+                yield _build_error_sse(msg, "INVALID_API_KEY_401")
+                yield "data: [DONE]\n\n"
+                return
+
+    # ── Method 2: HTTP Candidate Streaming Fallback ────────────────────────────
     request_headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -253,24 +300,21 @@ async def stream_hf_chat(
         "stream": True,
     }
 
-    # Try custom_endpoint if provided, else try candidates in order
     candidate_urls = [custom_endpoint] if custom_endpoint else HF_API_BASE_CANDIDATES
-    stripper = _ThinkTagStripper() if is_reasoning_model else None
-
     last_error_msg = ""
     last_error_code = ""
 
     for attempt_idx, api_url in enumerate(candidate_urls):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
-                async with client.stream(
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as http_client:
+                async with http_client.stream(
                     "POST",
                     api_url,
                     headers=request_headers,
                     json=request_body,
                 ) as resp:
 
-                    # ── Non-200 responses ──────────────────────────────────────────
+                    # ── Non-200 responses ──────────────────────────────────────
                     if resp.status_code != 200:
                         raw = (await resp.aread()).decode("utf-8", errors="ignore")
 
@@ -290,7 +334,6 @@ async def stream_hf_chat(
                             return
 
                         elif (resp.status_code in (400, 404, 500, 502, 503) or "not supported by provider" in raw.lower()) and attempt_idx < len(candidate_urls) - 1:
-                            # Try next candidate endpoint
                             continue
 
                         elif resp.status_code == 429:
@@ -304,7 +347,6 @@ async def stream_hf_chat(
                             return
 
                         elif resp.status_code in (503, 502, 500) and attempt_idx < len(candidate_urls) - 1:
-                            # Try next candidate endpoint before giving up
                             continue
 
                         elif resp.status_code == 503 or "loading" in raw.lower():
@@ -323,7 +365,7 @@ async def stream_hf_chat(
                             yield "data: [DONE]\n\n"
                             return
 
-                    # ── Successful stream ──────────────────────────────────────────
+                    # ── Successful stream ──────────────────────────────────────
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line or not line.startswith("data: "):
@@ -349,7 +391,6 @@ async def stream_hf_chat(
                         except Exception:
                             continue
 
-                    # Ensure [DONE] even if HF doesn't send it
                     yield "data: [DONE]\n\n"
                     return
 
