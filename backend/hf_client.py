@@ -2,7 +2,7 @@
 hf_client.py — OmniAI Hugging Face Inference API Streaming Client
 -----------------------------------------------------------------
 - Reads HF_API_KEY fresh on every request (no stale module-level cache)
-- Streams responses as SSE chunks via huggingface_hub AsyncInferenceClient and HTTP router
+- Streams responses as SSE chunks via huggingface_hub InferenceClient
 - Strips <think>…</think> reasoning blocks in-stream (for reasoning models)
 - Handles 401, 429, 503, timeout and network errors gracefully over SSE
 - Zero hardcoded mock responses; zero dead model references
@@ -11,12 +11,13 @@ hf_client.py — OmniAI Hugging Face Inference API Streaming Client
 import os
 import re
 import json
+import asyncio
 from typing import AsyncGenerator, List, Dict, Any, Optional
 import httpx
 from dotenv import load_dotenv, find_dotenv
 
 try:
-    from huggingface_hub import AsyncInferenceClient
+    from huggingface_hub import InferenceClient
     _HAS_HF_HUB = True
 except ImportError:
     _HAS_HF_HUB = False
@@ -27,14 +28,9 @@ except ImportError:
 _DOTENV_PATH = find_dotenv(usecwd=True)
 
 # ---------------------------------------------------------------------------
-# Hugging Face Inference API endpoints
+# Hugging Face Inference API Router URL
 # ---------------------------------------------------------------------------
 HF_API_BASE = "https://router.huggingface.co/v1/chat/completions"
-HF_API_BASE_CANDIDATES = [
-    "https://router.huggingface.co/v1/chat/completions",
-    "https://router.huggingface.co/hf-inference/v1/chat/completions",
-    "https://api-inference.huggingface.co/v1/chat/completions",
-]
 
 # ---------------------------------------------------------------------------
 # Model ID mapping: our internal IDs → HF repo IDs
@@ -120,7 +116,7 @@ def is_valid_hf_key(key: str) -> bool:
 
 def _resolve_hf_model(internal_id: str) -> str:
     """Map our internal model ID to the real HF repo ID."""
-    return MODEL_ID_MAP.get(internal_id, "mistralai/Mistral-7B-Instruct-v0.3")
+    return MODEL_ID_MAP.get(internal_id, "meta-llama/Llama-3.1-8B-Instruct")
 
 
 def _build_error_sse(msg: str, code: Optional[str] = None) -> str:
@@ -248,19 +244,25 @@ async def stream_hf_chat(
 
     stripper = _ThinkTagStripper() if is_reasoning_model else None
 
-    # ── Method 1: Use official huggingface_hub AsyncInferenceClient ────────────
+    # ── Method 1: Official huggingface_hub InferenceClient ─────────────────────
     if _HAS_HF_HUB and not custom_endpoint:
         try:
-            client = AsyncInferenceClient(token=api_key, timeout=90.0)
-            stream = await client.chat.completions.create(
-                model=effective_model,
-                messages=payload_messages,
-                temperature=0.4,
-                max_tokens=4096,
-                stream=True,
-            )
+            loop = asyncio.get_running_loop()
+            client = InferenceClient(token=api_key, timeout=90.0)
+
+            def _create_stream():
+                return client.chat.completions.create(
+                    model=effective_model,
+                    messages=payload_messages,
+                    temperature=0.4,
+                    max_tokens=4096,
+                    stream=True,
+                )
+
+            stream = await loop.run_in_executor(None, _create_stream)
+
             emitted_any = False
-            async for chunk in stream:
+            for chunk in stream:
                 if chunk.choices and len(chunk.choices) > 0:
                     delta = chunk.choices[0].delta.content or ""
                     if delta:
@@ -269,12 +271,13 @@ async def stream_hf_chat(
                             delta = stripper.feed(delta)
                         if delta:
                             yield f"data: {json.dumps({'content': delta, 'chunk': delta})}\n\n"
+
             if emitted_any:
                 yield "data: [DONE]\n\n"
                 return
         except Exception as hub_err:
             err_str = str(hub_err)
-            print(f"[WARN] AsyncInferenceClient exception: {err_str} — falling back to direct HTTP candidates")
+            print(f"[WARN] InferenceClient error: {err_str} — trying HTTP fallback")
             if "401" in err_str or "unauthorized" in err_str.lower():
                 key_prefix = api_key[:8] + "..." if api_key else "(empty)"
                 msg = (
@@ -300,11 +303,11 @@ async def stream_hf_chat(
         "stream": True,
     }
 
-    candidate_urls = [custom_endpoint] if custom_endpoint else HF_API_BASE_CANDIDATES
-    last_error_msg = ""
-    last_error_code = ""
+    candidate_urls = [
+        custom_endpoint if custom_endpoint else "https://router.huggingface.co/v1/chat/completions",
+    ]
 
-    for attempt_idx, api_url in enumerate(candidate_urls):
+    for api_url in candidate_urls:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as http_client:
                 async with http_client.stream(
@@ -314,58 +317,13 @@ async def stream_hf_chat(
                     json=request_body,
                 ) as resp:
 
-                    # ── Non-200 responses ──────────────────────────────────────
                     if resp.status_code != 200:
                         raw = (await resp.aread()).decode("utf-8", errors="ignore")
+                        msg = f"⚠️ **Hugging Face API Error ({resp.status_code})**\n\n```\n{raw[:400]}\n```"
+                        yield _build_error_sse(msg, f"HF_HTTP_{resp.status_code}")
+                        yield "data: [DONE]\n\n"
+                        return
 
-                        if resp.status_code == 401:
-                            key_prefix = api_key[:8] + "..." if api_key else "(empty)"
-                            msg = (
-                                "⚠️ **AI Service Authentication Error (401)**\n\n"
-                                "The Hugging Face API token configured on this server was rejected. "
-                                "The token needs to be updated in the Render deployment environment variables.\n\n"
-                                f"**Key prefix used**: `{key_prefix}`\n\n"
-                                "Please contact the app administrator. "
-                                "New tokens can be generated at "
-                                "[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)."
-                            )
-                            yield _build_error_sse(msg, "INVALID_API_KEY_401")
-                            yield "data: [DONE]\n\n"
-                            return
-
-                        elif (resp.status_code in (400, 404, 500, 502, 503) or "not supported by provider" in raw.lower()) and attempt_idx < len(candidate_urls) - 1:
-                            continue
-
-                        elif resp.status_code == 429:
-                            msg = (
-                                "⚠️ **Rate Limit Hit (429)**\n\n"
-                                f"Model `{effective_model}` hit the free-tier rate limit. "
-                                "Wait ~60 seconds and try again, or switch to a different model."
-                            )
-                            yield _build_error_sse(msg, "RATE_LIMIT_429")
-                            yield "data: [DONE]\n\n"
-                            return
-
-                        elif resp.status_code in (503, 502, 500) and attempt_idx < len(candidate_urls) - 1:
-                            continue
-
-                        elif resp.status_code == 503 or "loading" in raw.lower():
-                            msg = (
-                                "⏳ **Model Loading**\n\n"
-                                f"The model `{effective_model}` is loading on Hugging Face servers. "
-                                "Please retry in 20–30 seconds."
-                            )
-                            yield _build_error_sse(msg, "MODEL_LOADING_503")
-                            yield "data: [DONE]\n\n"
-                            return
-
-                        else:
-                            msg = f"⚠️ **Hugging Face API Error ({resp.status_code})**\n\n```\n{raw[:400]}\n```"
-                            yield _build_error_sse(msg, f"HF_HTTP_{resp.status_code}")
-                            yield "data: [DONE]\n\n"
-                            return
-
-                    # ── Successful stream ──────────────────────────────────────
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line or not line.startswith("data: "):
@@ -394,34 +352,10 @@ async def stream_hf_chat(
                     yield "data: [DONE]\n\n"
                     return
 
-        except httpx.TimeoutException:
-            if attempt_idx < len(candidate_urls) - 1:
-                continue
-            last_error_msg = (
-                "⚠️ **Request Timed Out** — Hugging Face took too long to respond.\n\n"
-                "This can happen when a model is cold (not yet loaded on HF servers). "
-                "Please wait 20–30 seconds and retry."
-            )
-            last_error_code = "TIMEOUT"
-
-        except httpx.ConnectError:
-            if attempt_idx < len(candidate_urls) - 1:
-                continue
-            last_error_msg = (
-                "⚠️ **Cannot Reach Hugging Face API** — Connection issue with Hugging Face router.\n\n"
-                "Please check back shortly or verify Hugging Face network availability."
-            )
-            last_error_code = "CONNECT_ERROR"
-
         except Exception as exc:
-            if attempt_idx < len(candidate_urls) - 1:
-                continue
-            last_error_msg = f"⚠️ **Unexpected Streaming Error**: `{type(exc).__name__}: {exc}`"
-            last_error_code = str(exc)
-
-    if last_error_msg:
-        yield _build_error_sse(last_error_msg, last_error_code)
-        yield "data: [DONE]\n\n"
+            msg = f"⚠️ **Streaming Error**: `{type(exc).__name__}: {exc}`"
+            yield _build_error_sse(msg, str(exc))
+            yield "data: [DONE]\n\n"
 
 
 # ---------------------------------------------------------------------------
