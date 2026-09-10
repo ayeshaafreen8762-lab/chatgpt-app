@@ -174,6 +174,11 @@ export default function ChatPage() {
 
   // Fetch or initialize sessions from backend
   const fetchSessions = async () => {
+    if (!isAuthenticated) {
+      // Guest users maintain their own private sessions in LocalStorage only
+      return;
+    }
+
     const apiBase = getBackendUrl();
     try {
       const res = await fetch(`${apiBase}/api/chat/sessions`, {
@@ -198,7 +203,7 @@ export default function ChatPage() {
     // If no sessions exist locally or from backend, create initial one
     setSessions((prev) => {
       if (prev.length > 0) return prev;
-      const localId = `sess_${Date.now()}`;
+      const localId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       const initialSess = [{ id: localId, title: "New Doubt Session", createdAt: Date.now() }];
       setActiveSessionId(localId);
       persistLocally(initialSess, sessionMessages);
@@ -207,6 +212,7 @@ export default function ChatPage() {
   };
 
   const fetchSessionMessages = async (sessionId: string) => {
+    if (!isAuthenticated) return;
     const apiBase = getBackendUrl();
     try {
       const res = await fetch(`${apiBase}/api/chat/sessions/${sessionId}/messages`, {
@@ -246,7 +252,7 @@ export default function ChatPage() {
   }, [currentMessages, isStreaming, activeDocument, scrollToBottom]);
 
   const createNewSession = async () => {
-    const localId = `sess_${Date.now()}`;
+    const localId = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     const newSess: ChatSession = { id: localId, title: "New Doubt Session", createdAt: Date.now() };
 
     setSessions((prev) => {
@@ -259,30 +265,32 @@ export default function ChatPage() {
     setActiveDocument(null);
     setConnectionError(null);
 
-    const apiBase = getBackendUrl();
-    try {
-      const res = await fetch(`${apiBase}/api/chat/sessions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getAuthHeaders(),
-        },
-        body: JSON.stringify({
-          title: "New Doubt Session",
-          model: selectedModel,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.session?.id) {
-          setSessions((prev) =>
-            prev.map((s) => (s.id === localId ? { ...s, id: data.session.id } : s))
-          );
-          setActiveSessionId(data.session.id);
+    if (isAuthenticated) {
+      const apiBase = getBackendUrl();
+      try {
+        const res = await fetch(`${apiBase}/api/chat/sessions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({
+            title: "New Doubt Session",
+            model: selectedModel,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.session?.id) {
+            setSessions((prev) =>
+              prev.map((s) => (s.id === localId ? { ...s, id: data.session.id } : s))
+            );
+            setActiveSessionId(data.session.id);
+          }
         }
+      } catch (err) {
+        // Offline / Local session works seamlessly
       }
-    } catch (err) {
-      // Offline / Local session works seamlessly
     }
   };
 

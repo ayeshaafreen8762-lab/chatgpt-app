@@ -299,14 +299,18 @@ def get_chat_sessions(
     current_user: Optional[models.DBUser] = Depends(auth.get_optional_current_user),
     db: Session = Depends(database.get_db),
 ):
-    user_id = current_user.id if current_user else None
-    query = db.query(models.DBChatSession)
-    if user_id:
-        query = query.filter(models.DBChatSession.user_id == user_id)
-    else:
-        query = query.filter(models.DBChatSession.user_id == None)
-        
-    sessions = query.order_by(models.DBChatSession.created_at.desc()).limit(50).all()
+    # Unauthenticated / guest users have their sessions strictly isolated in browser LocalStorage.
+    # Never return global/other guest sessions to prevent cross-user leakage!
+    if not current_user:
+        return {"sessions": []}
+
+    sessions = (
+        db.query(models.DBChatSession)
+        .filter(models.DBChatSession.user_id == current_user.id)
+        .order_by(models.DBChatSession.created_at.desc())
+        .limit(50)
+        .all()
+    )
     return {
         "sessions": [
             {
@@ -345,8 +349,18 @@ def create_session(
 @app.get("/api/chat/sessions/{session_id}/messages")
 def get_session_messages(
     session_id: str,
+    current_user: Optional[models.DBUser] = Depends(auth.get_optional_current_user),
     db: Session = Depends(database.get_db),
 ):
+    session = db.query(models.DBChatSession).filter(models.DBChatSession.id == session_id).first()
+    if not session:
+        return {"messages": []}
+
+    # If session belongs to an authenticated user, enforce authorization
+    if session.user_id is not None:
+        if not current_user or current_user.id != session.user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
     msgs = (
         db.query(models.DBChatMessage)
         .filter(models.DBChatMessage.session_id == session_id)
@@ -510,8 +524,10 @@ async def chat_stream_endpoint(
     elif req.message and req.message.strip():
         user_prompt = req.message.strip()
     elif req.messages and len(req.messages) > 0:
-        last_msg = req.messages[-1]
-        user_prompt = last_msg.get("content", "").strip()
+        for m in reversed(req.messages):
+            if m.get("role") in ("user", "human") and m.get("content", "").strip():
+                user_prompt = m.get("content", "").strip()
+                break
 
     if not user_prompt:
         raise HTTPException(status_code=400, detail="Missing user prompt or message")
@@ -558,24 +574,52 @@ async def chat_stream_endpoint(
         except Exception as rag_err:
             print(f"RAG retrieval warning: {rag_err}")
 
-    # ── 5. Assemble message history ──────────────────────────────────────────────
+    # ── 5. Assemble sanitized message history ──────────────────────────────────
     prepared_messages: List[Dict[str, Any]] = []
+    raw_history = req.messages or req.history or []
 
-    if req.messages and len(req.messages) > 1:
-        for m in req.messages[:-1]:
-            prepared_messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
-    elif req.history:
-        for h in req.history[-6:]:
-            if isinstance(h, dict):
-                prepared_messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
-            elif hasattr(h, "role") and hasattr(h, "content"):
-                prepared_messages.append({"role": h.role, "content": h.content})
+    for item in raw_history:
+        if isinstance(item, dict):
+            r = item.get("role", "user")
+            c = item.get("content", "")
+        elif hasattr(item, "role") and hasattr(item, "content"):
+            r = item.role
+            c = item.content
+        else:
+            continue
+
+        norm_role = "user" if r in ("user", "human") else "assistant"
+        c_str = str(c or "").strip()
+        if not c_str:
+            continue
+
+        # Prevent duplicate adjacent identical roles
+        if prepared_messages and prepared_messages[-1]["role"] == norm_role:
+            if norm_role == "user":
+                prepared_messages[-1]["content"] = c_str
+            else:
+                prepared_messages[-1]["content"] += f"\n\n{c_str}"
+        else:
+            prepared_messages.append({"role": norm_role, "content": c_str})
+
+    # If the last message is already a user message that equals user_prompt, pop it so we append cleanly
+    if prepared_messages and prepared_messages[-1]["role"] == "user":
+        if prepared_messages[-1]["content"] == user_prompt:
+            prepared_messages.pop()
+
+    # Limit to last 6 turns (3 exchanges)
+    prepared_messages = prepared_messages[-6:]
 
     effective_query = user_prompt
     if rag_context_text:
         effective_query = f"{rag_context_text}\nUser Question/Doubt: {user_prompt}"
 
     prepared_messages.append({"role": "user", "content": effective_query})
+
+    # Log incoming request for verification and debugging
+    print(f"\n[OmniAI Outgoing Request] Session: {session_id} | User: {current_user.id if current_user else 'Guest'} | Model: {resolved_model_id}")
+    print(f"[OmniAI Question] '{user_prompt[:120]}'")
+    print(f"[OmniAI Prepared Messages Count] {len(prepared_messages)}")
 
     # ── 6. Save user message ─────────────────────────────────────────────────────
     try:
@@ -593,20 +637,7 @@ async def chat_stream_endpoint(
         db.rollback()
         print(f"User message save warning: {save_err}")
 
-    # ── 7. Resolve actual model (with single-hop fallback on error) ──────────────
-    #
-    # Strategy: try the requested model. If the first SSE chunk we receive back
-    # is an error payload with code RATE_LIMIT_429 / HF_SERVER_ERROR_* / TIMEOUT,
-    # we swap to the next model in the fallback chain and restart the stream.
-    # Max one fallback hop. Auth checks are fully preserved throughout.
-    #
-    # We implement this by wrapping the generator: we buffer the first real content
-    # chunk. If it's an error code we care about we can restart; otherwise we
-    # relay the buffer and continue. Because SSE is push-only and we cannot
-    # "un-send" already-written bytes, the fallback must be decided BEFORE we
-    # begin yielding to the client. We therefore do a non-streaming probe for the
-    # fallback decision only when the model's first response is a fatal error code.
-
+    # ── 7. Stream with seamless lookahead fallback ──────────────────────────────
     _model_cfg = requested_cfg
     _model_used = resolved_model_id
     _fallback_triggered = False
@@ -617,147 +648,130 @@ async def chat_stream_endpoint(
 
         collected_chunks: List[str] = []
         emitted_done = False
+        has_emitted_content = False
 
-        # Buffer first error to decide on fallback before emitting to client
-        # We collect ALL sse events from the primary model into a small look-ahead
-        # buffer. If it turns out to be a retriable error, we swap model and restart.
-        primary_events: List[str] = []
-        primary_error_code: Optional[str] = None
-        primary_got_content = False
+        current_model = _model_cfg["id"]
+        fallback_model = models_config.get_fallback_model(current_model)
 
-        # --- Probe-style: collect first batch of SSE events from primary model ---
+        # Buffer initial chunks from primary stream
+        primary_gen = hf_client.stream_hf_chat(
+            messages=prepared_messages,
+            model=current_model,
+            has_image=bool(req.imageUrl),
+            image_url=req.imageUrl,
+            custom_endpoint=req.customEndpoint,
+            is_reasoning_model=_model_cfg.get("reasoning", False),
+            model_used=current_model,
+            session_id=session_id,
+            fallback_triggered=False,
+        )
+
+        buffer: List[str] = []
+        error_detected = False
+
         try:
-            async for sse_chunk in hf_client.stream_hf_chat(
-                messages=prepared_messages,
-                model=_model_cfg["id"],
-                has_image=bool(req.imageUrl),
-                image_url=req.imageUrl,
-                custom_endpoint=req.customEndpoint,
-                is_reasoning_model=_model_cfg.get("reasoning", False),
-                model_used=_model_cfg["id"],
-            ):
-                primary_events.append(sse_chunk)
-                if sse_chunk.startswith("data: "):
-                    data_part = sse_chunk[6:].strip()
+            async for chunk in primary_gen:
+                buffer.append(chunk)
+                if chunk.startswith("data: "):
+                    data_part = chunk[6:].strip()
                     if data_part != "[DONE]":
                         try:
-                            parsed = json.loads(data_part)
-                            if parsed.get("error") and not parsed.get("content"):
-                                primary_error_code = parsed.get("error", "")
-                            elif parsed.get("content") or parsed.get("chunk"):
-                                primary_got_content = True
-                                break  # Got real content — no fallback needed; stream remaining
+                            p = json.loads(data_part)
+                            if p.get("error") and not p.get("content"):
+                                error_detected = True
+                                break
+                            elif p.get("content") or p.get("chunk"):
+                                has_emitted_content = True
+                                break  # Real content started — stream directly
                         except Exception:
                             pass
                     elif data_part == "[DONE]":
                         break
-        except Exception as probe_err:
-            primary_error_code = str(probe_err)
+        except Exception as err:
+            print(f"[Primary Stream Init Error] {err}")
+            error_detected = True
 
-        # --- Decide: fallback or continue with primary? ---
         need_fallback = (
-            not primary_got_content
-            and primary_error_code is not None
-            and _model_cfg["id"] != "hf/llama-3-8b-instruct"
+            error_detected
+            and not has_emitted_content
+            and fallback_model is not None
+            and current_model != fallback_model["id"]
         )
 
         if need_fallback:
-            fallback_cfg = models_config.get_fallback_model(_model_cfg["id"])
-            if fallback_cfg:
-                _original_model_id = _model_cfg["id"]
-                _model_cfg = fallback_cfg
-                _model_used = fallback_cfg["id"]
-                _fallback_triggered = True
-                primary_events = []  # discard primary error events
-                primary_got_content = False
-                # Re-run stream with fallback model
-                try:
-                    async for sse_chunk in hf_client.stream_hf_chat(
-                        messages=prepared_messages,
-                        model=_model_cfg["id"],
-                        has_image=bool(req.imageUrl),
-                        image_url=req.imageUrl,
-                        custom_endpoint=req.customEndpoint,
-                        is_reasoning_model=_model_cfg.get("reasoning", False),
-                        model_used=_model_cfg["id"],
-                        fallback_triggered=True,
-                        original_model=_original_model_id,
-                    ):
-                        primary_events.append(sse_chunk)
-                        if sse_chunk.startswith("data: "):
-                            data_part = sse_chunk[6:].strip()
-                            if data_part != "[DONE]":
-                                try:
-                                    parsed = json.loads(data_part)
-                                    if parsed.get("content") or parsed.get("chunk"):
-                                        primary_got_content = True
-                                        break
-                                except Exception:
-                                    pass
-                            elif data_part == "[DONE]":
-                                break
-                except Exception as fb_err:
-                    print(f"Fallback stream error: {fb_err}")
+            print(f"[Fallback Triggered] Switching from '{current_model}' to '{fallback_model['id']}'")
+            _original_model_id = current_model
+            _model_used = fallback_model["id"]
+            _fallback_triggered = True
 
-        # --- Emit metadata event first ---
-        meta: Dict[str, Any] = {
-            "sessionId": session_id,
-            "model_used": _model_used,
-            "fallback_triggered": _fallback_triggered,
-        }
-        if _fallback_triggered and _original_model_id:
-            meta["original_model"] = _original_model_id
-        yield f"data: {json.dumps(meta)}\n\n"
-
-        # --- Relay buffered events ---
-        for sse_chunk in primary_events:
-            yield sse_chunk
-            if sse_chunk.startswith("data: "):
-                data_part = sse_chunk[6:].strip()
-                if data_part == "[DONE]":
-                    emitted_done = True
-                else:
-                    try:
-                        payload = json.loads(data_part)
-                        delta = payload.get("content") or payload.get("chunk")
-                        if delta:
-                            collected_chunks.append(delta)
-                    except Exception:
-                        pass
-
-        if emitted_done:
-            pass  # Already done from buffer
-        else:
-            # Continue streaming remaining chunks from the chosen model
             try:
-                async for sse_chunk in hf_client.stream_hf_chat(
+                async for chunk in hf_client.stream_hf_chat(
                     messages=prepared_messages,
-                    model=_model_cfg["id"],
+                    model=_model_used,
                     has_image=bool(req.imageUrl),
                     image_url=req.imageUrl,
                     custom_endpoint=req.customEndpoint,
-                    is_reasoning_model=_model_cfg.get("reasoning", False),
-                    model_used=_model_cfg["id"],
-                    fallback_triggered=_fallback_triggered,
+                    is_reasoning_model=fallback_model.get("reasoning", False),
+                    model_used=_model_used,
+                    session_id=session_id,
+                    fallback_triggered=True,
                     original_model=_original_model_id,
                 ):
-                    yield sse_chunk
-                    if sse_chunk.startswith("data: "):
-                        data_part = sse_chunk[6:].strip()
-                        if data_part == "[DONE]":
+                    yield chunk
+                    if chunk.startswith("data: "):
+                        dp = chunk[6:].strip()
+                        if dp == "[DONE]":
                             emitted_done = True
                         else:
                             try:
-                                payload = json.loads(data_part)
-                                delta = payload.get("content") or payload.get("chunk")
-                                if delta:
-                                    collected_chunks.append(delta)
+                                p = json.loads(dp)
+                                c = p.get("content") or p.get("chunk")
+                                if c:
+                                    collected_chunks.append(c)
                             except Exception:
                                 pass
-            except Exception as stream_err:
-                print(f"SSE continuation stream error: {stream_err}")
-                err_payload = f"⚠️ Streaming interrupted: {str(stream_err)}"
-                yield f"data: {json.dumps({'content': err_payload, 'chunk': err_payload, 'error': str(stream_err)})}\n\n"
+            except Exception as fb_err:
+                print(f"[Fallback Stream Error] {fb_err}")
+                err_payload = f"⚠️ Streaming error: {str(fb_err)}"
+                yield f"data: {json.dumps({'content': err_payload, 'chunk': err_payload, 'error': str(fb_err)})}\n\n"
+        else:
+            # Yield buffered events from the primary stream
+            for chunk in buffer:
+                yield chunk
+                if chunk.startswith("data: "):
+                    dp = chunk[6:].strip()
+                    if dp == "[DONE]":
+                        emitted_done = True
+                    else:
+                        try:
+                            p = json.loads(dp)
+                            c = p.get("content") or p.get("chunk")
+                            if c:
+                                collected_chunks.append(c)
+                        except Exception:
+                            pass
+
+            # Continue reading directly from the SAME ongoing primary generator
+            if not emitted_done:
+                try:
+                    async for chunk in primary_gen:
+                        yield chunk
+                        if chunk.startswith("data: "):
+                            dp = chunk[6:].strip()
+                            if dp == "[DONE]":
+                                emitted_done = True
+                            else:
+                                try:
+                                    p = json.loads(dp)
+                                    c = p.get("content") or p.get("chunk")
+                                    if c:
+                                        collected_chunks.append(c)
+                                except Exception:
+                                    pass
+                except Exception as cont_err:
+                    print(f"[Stream Continuation Error] {cont_err}")
+                    err_payload = f"⚠️ Streaming interrupted: {str(cont_err)}"
+                    yield f"data: {json.dumps({'content': err_payload, 'chunk': err_payload, 'error': str(cont_err)})}\n\n"
 
         if not emitted_done:
             yield "data: [DONE]\n\n"
