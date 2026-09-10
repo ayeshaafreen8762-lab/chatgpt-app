@@ -21,10 +21,15 @@ from dotenv import load_dotenv, find_dotenv
 _DOTENV_PATH = find_dotenv(usecwd=True)
 
 # ---------------------------------------------------------------------------
-# Hugging Face Inference API base
-# Supports the OpenAI-compatible /v1/chat/completions endpoint via router
+# Hugging Face Inference API endpoints
+# HF has transitioned chat completions to router.huggingface.co
 # ---------------------------------------------------------------------------
-HF_API_BASE = "https://api-inference.huggingface.co/v1/chat/completions"
+HF_API_BASE = "https://router.huggingface.co/hf-inference/v1/chat/completions"
+HF_API_BASE_CANDIDATES = [
+    "https://router.huggingface.co/hf-inference/v1/chat/completions",
+    "https://router.huggingface.co/v1/chat/completions",
+    "https://api-inference.huggingface.co/v1/chat/completions",
+]
 
 # ---------------------------------------------------------------------------
 # Model ID mapping: our internal IDs → HF repo IDs
@@ -243,121 +248,138 @@ async def stream_hf_chat(
         "stream": True,
     }
 
-    # Use custom_endpoint if provided, else default HF inference URL
-    api_url = custom_endpoint if custom_endpoint else HF_API_BASE
+    # Try custom_endpoint if provided, else try candidates in order
+    candidate_urls = [custom_endpoint] if custom_endpoint else HF_API_BASE_CANDIDATES
     stripper = _ThinkTagStripper() if is_reasoning_model else None
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+    last_error_msg = ""
+    last_error_code = ""
+
+    for attempt_idx, api_url in enumerate(candidate_urls):
         try:
-            async with client.stream(
-                "POST",
-                api_url,
-                headers=request_headers,
-                json=request_body,
-            ) as resp:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+                async with client.stream(
+                    "POST",
+                    api_url,
+                    headers=request_headers,
+                    json=request_body,
+                ) as resp:
 
-                # ── Non-200 responses ──────────────────────────────────────────
-                if resp.status_code != 200:
-                    raw = (await resp.aread()).decode("utf-8", errors="ignore")
+                    # ── Non-200 responses ──────────────────────────────────────────
+                    if resp.status_code != 200:
+                        raw = (await resp.aread()).decode("utf-8", errors="ignore")
 
-                    if resp.status_code == 401:
-                        key_prefix = api_key[:8] + "..." if api_key else "(empty)"
-                        print(
-                            f"[ERROR] HF 401 Unauthorized. The deployed HF_API_KEY was rejected. "
-                            f"Prefix: '{key_prefix}'. Update HF_API_KEY in Render environment."
-                        )
-                        msg = (
-                            "⚠️ **AI Service Authentication Error (401)**\n\n"
-                            "The Hugging Face API token configured on this server was rejected. "
-                            "The token needs to be updated in the Render deployment environment variables.\n\n"
-                            f"**Key prefix used**: `{key_prefix}`\n\n"
-                            "Please contact the app administrator. "
-                            "New tokens can be generated at "
-                            "[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)."
-                        )
-                        yield _build_error_sse(msg, "INVALID_API_KEY_401")
+                        if resp.status_code == 401:
+                            key_prefix = api_key[:8] + "..." if api_key else "(empty)"
+                            print(
+                                f"[ERROR] HF 401 Unauthorized. The deployed HF_API_KEY was rejected. "
+                                f"Prefix: '{key_prefix}'. Update HF_API_KEY in Render environment."
+                            )
+                            msg = (
+                                "⚠️ **AI Service Authentication Error (401)**\n\n"
+                                "The Hugging Face API token configured on this server was rejected. "
+                                "The token needs to be updated in the Render deployment environment variables.\n\n"
+                                f"**Key prefix used**: `{key_prefix}`\n\n"
+                                "Please contact the app administrator. "
+                                "New tokens can be generated at "
+                                "[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)."
+                            )
+                            yield _build_error_sse(msg, "INVALID_API_KEY_401")
+                            yield "data: [DONE]\n\n"
+                            return
 
-                    elif resp.status_code == 429:
-                        msg = (
-                            "⚠️ **Rate Limit Hit (429)**\n\n"
-                            f"Model `{effective_model}` hit the free-tier rate limit. "
-                            "Wait ~60 seconds and try again, or switch to a different model."
-                        )
-                        yield _build_error_sse(msg, "RATE_LIMIT_429")
+                        elif resp.status_code == 404 and attempt_idx < len(candidate_urls) - 1:
+                            # Try next router URL
+                            continue
 
-                    elif resp.status_code in (503, 502, 500):
-                        msg = (
-                            f"⚠️ **Hugging Face Service Unavailable ({resp.status_code})**\n\n"
-                            "The HF Inference API is temporarily down. Please try again in a moment.\n\n"
-                            f"*Server response*: `{raw[:300]}`"
-                        )
-                        yield _build_error_sse(msg, f"HF_SERVER_ERROR_{resp.status_code}")
+                        elif resp.status_code == 429:
+                            msg = (
+                                "⚠️ **Rate Limit Hit (429)**\n\n"
+                                f"Model `{effective_model}` hit the free-tier rate limit. "
+                                "Wait ~60 seconds and try again, or switch to a different model."
+                            )
+                            yield _build_error_sse(msg, "RATE_LIMIT_429")
+                            yield "data: [DONE]\n\n"
+                            return
 
-                    elif resp.status_code == 503 or "loading" in raw.lower():
-                        msg = (
-                            "⏳ **Model Loading**\n\n"
-                            f"The model `{effective_model}` is loading on Hugging Face servers. "
-                            "Please retry in 20–30 seconds."
-                        )
-                        yield _build_error_sse(msg, "MODEL_LOADING_503")
+                        elif resp.status_code in (503, 502, 500) and attempt_idx < len(candidate_urls) - 1:
+                            # Try next candidate endpoint before giving up
+                            continue
 
-                    else:
-                        msg = f"⚠️ **Hugging Face API Error ({resp.status_code})**\n\n```\n{raw[:400]}\n```"
-                        yield _build_error_sse(msg, f"HF_HTTP_{resp.status_code}")
+                        elif resp.status_code == 503 or "loading" in raw.lower():
+                            msg = (
+                                "⏳ **Model Loading**\n\n"
+                                f"The model `{effective_model}` is loading on Hugging Face servers. "
+                                "Please retry in 20–30 seconds."
+                            )
+                            yield _build_error_sse(msg, "MODEL_LOADING_503")
+                            yield "data: [DONE]\n\n"
+                            return
 
+                        else:
+                            msg = f"⚠️ **Hugging Face API Error ({resp.status_code})**\n\n```\n{raw[:400]}\n```"
+                            yield _build_error_sse(msg, f"HF_HTTP_{resp.status_code}")
+                            yield "data: [DONE]\n\n"
+                            return
+
+                    # ── Successful stream ──────────────────────────────────────────
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data: "):
+                            continue
+
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            yield "data: [DONE]\n\n"
+                            return
+
+                        try:
+                            parsed = json.loads(data_str)
+                            delta = (
+                                parsed.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            )
+                            if delta:
+                                if stripper is not None:
+                                    delta = stripper.feed(delta)
+                                if delta:
+                                    yield f"data: {json.dumps({'content': delta, 'chunk': delta})}\n\n"
+                        except Exception:
+                            continue
+
+                    # Ensure [DONE] even if HF doesn't send it
                     yield "data: [DONE]\n\n"
                     return
 
-                # ── Successful stream ──────────────────────────────────────────
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-
-                    data_str = line[6:].strip()
-                    if data_str == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                        return
-
-                    try:
-                        parsed = json.loads(data_str)
-                        delta = (
-                            parsed.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content", "")
-                        )
-                        if delta:
-                            if stripper is not None:
-                                delta = stripper.feed(delta)
-                            if delta:
-                                yield f"data: {json.dumps({'content': delta, 'chunk': delta})}\n\n"
-                    except Exception:
-                        continue
-
-                # Ensure [DONE] even if HF doesn't send it
-                yield "data: [DONE]\n\n"
-
         except httpx.TimeoutException:
-            msg = (
+            if attempt_idx < len(candidate_urls) - 1:
+                continue
+            last_error_msg = (
                 "⚠️ **Request Timed Out** — Hugging Face took too long to respond.\n\n"
                 "This can happen when a model is cold (not yet loaded on HF servers). "
                 "Please wait 20–30 seconds and retry."
             )
-            yield _build_error_sse(msg, "TIMEOUT")
-            yield "data: [DONE]\n\n"
+            last_error_code = "TIMEOUT"
 
         except httpx.ConnectError:
-            msg = (
-                "⚠️ **Cannot Reach Hugging Face API** — Connection refused.\n\n"
-                "Ensure the server has internet access and `api-inference.huggingface.co` is reachable."
+            if attempt_idx < len(candidate_urls) - 1:
+                continue
+            last_error_msg = (
+                "⚠️ **Cannot Reach Hugging Face API** — Connection issue with Hugging Face router.\n\n"
+                "Please check back shortly or verify Hugging Face network availability."
             )
-            yield _build_error_sse(msg, "CONNECT_ERROR")
-            yield "data: [DONE]\n\n"
+            last_error_code = "CONNECT_ERROR"
 
         except Exception as exc:
-            msg = f"⚠️ **Unexpected Streaming Error**: `{type(exc).__name__}: {exc}`"
-            yield _build_error_sse(msg, str(exc))
-            yield "data: [DONE]\n\n"
+            if attempt_idx < len(candidate_urls) - 1:
+                continue
+            last_error_msg = f"⚠️ **Unexpected Streaming Error**: `{type(exc).__name__}: {exc}`"
+            last_error_code = str(exc)
+
+    if last_error_msg:
+        yield _build_error_sse(last_error_msg, last_error_code)
+        yield "data: [DONE]\n\n"
 
 
 # ---------------------------------------------------------------------------
