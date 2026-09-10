@@ -43,7 +43,7 @@ A production-ready, 100% free-to-operate, open-source multi-user ChatGPT-style A
 | **Visual Rendering** | Mermaid.js, Recharts, KaTeX (`react-katex`) |
 | **Audio / Camera** | Web Speech API, `navigator.mediaDevices.getUserMedia` |
 | **Backend API** | FastAPI (Python 3.11+), AsyncPG, SQLAlchemy, Pydantic v2 |
-| **Hosted LLM Inference** | Groq Cloud API (`llama-3.3-70b-versatile` & `llama-3.2-11b-vision-preview`), SSE real-time streaming |
+| **Hosted LLM Inference** | Hugging Face Inference API (`Mistral-7B-Instruct-v0.3`, `Mistral-NeMo`, `Llama-3-8B`, `Qwen2-7B`), SSE real-time streaming |
 | **Database & Vectors** | PostgreSQL + `pgvector` (Neon.tech or Supabase free tiers) or SQLite local fallback |
 
 ---
@@ -91,11 +91,12 @@ uvicorn main:app --reload --port 8000
    DATABASE_URL=postgresql://user:password@ep-cool-fog-12345.us-east-2.aws.neon.tech/neondb?sslmode=require
    ```
 
-### 2. Groq Cloud Inference
-1. Create a free account on [Groq Console](https://console.groq.com/keys).
-2. Generate an API Key and set:
+### 2. Hugging Face Inference Token
+1. Create a free account on [Hugging Face](https://huggingface.co/join).
+2. Generate an Access Token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (Read role).
+3. Set in your environment or Render Dashboard:
    ```env
-   GROQ_API_KEY=gsk_your_free_groq_api_key
+   HF_API_KEY=hf_your_free_huggingface_api_key
    ```
 
 ### 3. Backend Deployment (Render or Railway Free Tier)
