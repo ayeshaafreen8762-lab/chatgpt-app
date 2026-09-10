@@ -655,11 +655,10 @@ async def chat_stream_endpoint(
             primary_error_code = str(probe_err)
 
         # --- Decide: fallback or continue with primary? ---
-        retriable_codes = ("RATE_LIMIT_429", "TIMEOUT", "CONNECT_ERROR")
         need_fallback = (
             not primary_got_content
             and primary_error_code is not None
-            and any(code in str(primary_error_code) for code in retriable_codes)
+            and _model_cfg["id"] != "hf/llama-3-8b-instruct"
         )
 
         if need_fallback:

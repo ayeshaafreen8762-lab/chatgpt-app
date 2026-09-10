@@ -36,10 +36,15 @@ HF_API_BASE = "https://router.huggingface.co/v1/chat/completions"
 # Model ID mapping: our internal IDs → HF repo IDs
 # ---------------------------------------------------------------------------
 MODEL_ID_MAP: Dict[str, str] = {
-    "hf/mistral-7b-instruct":  "mistralai/Mistral-7B-Instruct-v0.3",
-    "hf/mistral-nemo":         "mistralai/Mistral-Nemo-Instruct-2407",
-    "hf/llama-3-8b-instruct":  "meta-llama/Llama-3.1-8B-Instruct",
-    "hf/qwen2-7b-instruct":    "Qwen/Qwen2.5-7B-Instruct",
+    "hf/llama-3-8b-instruct":   "meta-llama/Llama-3.1-8B-Instruct",
+    "hf/qwen2.5-coder-7b":     "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "hf/qwen2.5-coder-32b":    "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "hf/phi-4":                "microsoft/phi-4",
+    "hf/deepseek-r1-llama-8b": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    # Legacy fallbacks for backwards compatibility
+    "hf/mistral-7b-instruct":  "meta-llama/Llama-3.1-8B-Instruct",
+    "hf/mistral-nemo":         "meta-llama/Llama-3.1-8B-Instruct",
+    "hf/qwen2-7b-instruct":    "Qwen/Qwen2.5-Coder-7B-Instruct",
 }
 
 # ---------------------------------------------------------------------------
@@ -78,13 +83,16 @@ Guidelines for Doubt Solving:
        "data": [{"x": 0, "y": 0}, {"x": 1, "y": 1}]
      }
      ```
-2. **Mathematical Rigor & LaTeX**:
+2. **Table Formatting for Comparative & Structured Data**:
+   - Whenever comparing items (e.g., programming languages, algorithms, physics concepts, pros & cons, step summaries, or feature matrix), ALWAYS present the comparison using a clean, well-formatted Markdown Table with header rows (e.g. `| Feature | Option A | Option B |`).
+   - Do NOT output unstructured plain text paragraphs when comparing concepts.
+3. **Mathematical Rigor & LaTeX**:
    - Write all formulas and equations in crisp LaTeX.
    - For standalone equations, use display math: `$$ ... $$`.
    - For inline variables, use: `$x$`.
-3. **Step-by-Step Problem Solving**:
+4. **Step-by-Step Problem Solving**:
    - Break down problems into Problem Statement, Core Intuition, Step-by-Step Derivation, and Final Answer.
-4. **Document & RAG Grounding**:
+5. **Document & RAG Grounding**:
    - If provided with Document/RAG context, cite the exact source/page (e.g. `[Reference Page X]`).
 """
 
