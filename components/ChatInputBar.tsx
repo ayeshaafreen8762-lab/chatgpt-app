@@ -270,7 +270,7 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = ({
       </div>
 
       <div className="text-center mt-2 text-[11px] text-zinc-500">
-        Free & Open-Source AI Tutor powered by Groq Llama 3.3 70B & Vision. Verify critical academic calculations.
+        Free &amp; Open-Source AI Tutor powered by Hugging Face Mistral 7B. Verify critical academic calculations.
       </div>
     </div>
   );

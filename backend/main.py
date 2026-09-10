@@ -14,7 +14,7 @@ import database
 import models
 import auth
 import rag_engine
-import groq_client
+import hf_client
 import models_config
 
 load_dotenv()
@@ -27,8 +27,8 @@ except Exception as db_err:
 
 app = FastAPI(
     title="OmniAI Doubt-Solving Platform API",
-    description="Production-Ready Multi-User AI Learning Platform with FastAPI, Groq SSE Streaming, pgvector RAG, and Visual Doubt Generation",
-    version="2.2.0",
+    description="Production-Ready Multi-User AI Learning Platform with FastAPI, Hugging Face SSE Streaming, pgvector RAG, and Visual Doubt Generation",
+    version="2.3.0",
 )
 
 # Robust CORS Configuration
@@ -106,7 +106,7 @@ def read_root():
     return {
         "status": "online",
         "service": "OmniAI Doubt-Solving API",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "db": "Connected (pgvector & SQLite supported)",
     }
 
@@ -470,7 +470,7 @@ def get_document_details(
         }
     }
 
-# Dynamic Groq Chat Streaming Endpoint with RAG + SSE + Model Switcher
+# Dynamic HF Chat Streaming Endpoint with RAG + SSE + Model Switcher
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(
     req: ChatStreamRequest,
@@ -478,7 +478,7 @@ async def chat_stream_endpoint(
     db: Session = Depends(database.get_db),
 ):
     """
-    Real-time Groq LLM SSE stream with model validation and single-hop fallback.
+    Real-time Hugging Face Inference API SSE stream with model validation and single-hop fallback.
 
     Request body fields:
       model_id  : preferred model (validated against models_config; new canonical field)
@@ -596,7 +596,7 @@ async def chat_stream_endpoint(
     # ── 7. Resolve actual model (with single-hop fallback on error) ──────────────
     #
     # Strategy: try the requested model. If the first SSE chunk we receive back
-    # is an error payload with code RATE_LIMIT_429 / GROQ_SERVER_ERROR_* / TIMEOUT,
+    # is an error payload with code RATE_LIMIT_429 / HF_SERVER_ERROR_* / TIMEOUT,
     # we swap to the next model in the fallback chain and restart the stream.
     # Max one fallback hop. Auth checks are fully preserved throughout.
     #
@@ -627,7 +627,7 @@ async def chat_stream_endpoint(
 
         # --- Probe-style: collect first batch of SSE events from primary model ---
         try:
-            async for sse_chunk in groq_client.stream_groq_chat(
+            async for sse_chunk in hf_client.stream_hf_chat(
                 messages=prepared_messages,
                 model=_model_cfg["id"],
                 has_image=bool(req.imageUrl),
@@ -673,7 +673,7 @@ async def chat_stream_endpoint(
                 primary_got_content = False
                 # Re-run stream with fallback model
                 try:
-                    async for sse_chunk in groq_client.stream_groq_chat(
+                    async for sse_chunk in hf_client.stream_hf_chat(
                         messages=prepared_messages,
                         model=_model_cfg["id"],
                         has_image=bool(req.imageUrl),
@@ -731,7 +731,7 @@ async def chat_stream_endpoint(
         else:
             # Continue streaming remaining chunks from the chosen model
             try:
-                async for sse_chunk in groq_client.stream_groq_chat(
+                async for sse_chunk in hf_client.stream_hf_chat(
                     messages=prepared_messages,
                     model=_model_cfg["id"],
                     has_image=bool(req.imageUrl),

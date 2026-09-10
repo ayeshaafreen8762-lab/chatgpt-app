@@ -1,8 +1,9 @@
 """
-groq_client.py — OmniAI Groq Streaming Client
-- Reads GROQ_API_KEY fresh on every request (no stale module-level cache)
-- Streams responses as SSE chunks via the OpenAI-compatible Groq endpoint
-- Strips <think>…</think> reasoning blocks from Qwen models in-stream
+hf_client.py — OmniAI Hugging Face Inference API Streaming Client
+-----------------------------------------------------------------
+- Reads HF_API_KEY fresh on every request (no stale module-level cache)
+- Streams responses as SSE chunks via the HF Inference API
+- Strips <think>…</think> reasoning blocks in-stream (for reasoning models)
 - Handles 401, 429, 503, timeout and network errors gracefully over SSE
 - Zero hardcoded mock responses; zero dead model references
 """
@@ -14,9 +15,30 @@ from typing import AsyncGenerator, List, Dict, Any, Optional
 import httpx
 from dotenv import load_dotenv, find_dotenv
 
-# Reload .env on module import (will also be re-read per-request via get_groq_key())
+# ---------------------------------------------------------------------------
+# Reload .env on module import
+# ---------------------------------------------------------------------------
 _DOTENV_PATH = find_dotenv(usecwd=True)
 
+# ---------------------------------------------------------------------------
+# Hugging Face Inference API base
+# Supports the OpenAI-compatible /v1/chat/completions endpoint via router
+# ---------------------------------------------------------------------------
+HF_API_BASE = "https://api-inference.huggingface.co/v1/chat/completions"
+
+# ---------------------------------------------------------------------------
+# Model ID mapping: our internal IDs → HF repo IDs
+# ---------------------------------------------------------------------------
+MODEL_ID_MAP: Dict[str, str] = {
+    "hf/mistral-7b-instruct":  "mistralai/Mistral-7B-Instruct-v0.3",
+    "hf/mistral-nemo":         "mistralai/Mistral-Nemo-Instruct-2407",
+    "hf/llama-3-8b-instruct":  "meta-llama/Meta-Llama-3-8B-Instruct",
+    "hf/qwen2-7b-instruct":    "Qwen/Qwen2-7B-Instruct",
+}
+
+# ---------------------------------------------------------------------------
+# System prompt (same as before — keep AI behaviour identical)
+# ---------------------------------------------------------------------------
 SYSTEM_DOUBT_SOLVER_PROMPT = """You are OmniAI, a world-class Principal AI Tutor and Doubt Solver.
 Your goal is to solve academic, technical, scientific, and coding doubts with maximum clarity, intuitive pedagogy, and rich visual aids.
 
@@ -61,25 +83,34 @@ Guidelines for Doubt Solving:
 """
 
 
-def get_groq_key() -> str:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_hf_key() -> str:
     """
-    Re-reads GROQ_API_KEY from disk on every call so that key rotations /
+    Re-reads HF_API_KEY from disk on every call so that key rotations /
     .env edits are picked up without restarting uvicorn.
     """
     if _DOTENV_PATH:
         load_dotenv(_DOTENV_PATH, override=True)
-    key = os.getenv("GROQ_API_KEY", "").strip()
-    prefix = key[:6] if key else "(none)"
-    print(f"[DEBUG GROQ_API_KEY] loaded prefix: '{prefix}' | length: {len(key)}")
+    key = os.getenv("HF_API_KEY", "").strip()
+    prefix = key[:8] if key else "(none)"
+    print(f"[DEBUG HF_API_KEY] loaded prefix: '{prefix}' | length: {len(key)}")
     return key
 
 
-def is_valid_key(key: str) -> bool:
-    """Returns True only if the key looks like a real (non-placeholder) Groq key."""
-    if not key or len(key) < 16:
+def is_valid_hf_key(key: str) -> bool:
+    """Returns True only if the key looks like a real (non-placeholder) HF token."""
+    if not key or len(key) < 10:
         return False
-    placeholders = ("your_actual", "your_key", "placeholder", "xxxx", "gsk_your", "replace_me", "insert_key")
+    placeholders = ("your_key", "placeholder", "xxxx", "hf_your", "replace_me", "insert_key", "your_actual")
     return not any(p in key.lower() for p in placeholders)
+
+
+def _resolve_hf_model(internal_id: str) -> str:
+    """Map our internal model ID to the real HF repo ID."""
+    return MODEL_ID_MAP.get(internal_id, "mistralai/Mistral-7B-Instruct-v0.3")
 
 
 def _build_error_sse(msg: str, code: Optional[str] = None) -> str:
@@ -90,16 +121,15 @@ def _build_error_sse(msg: str, code: Optional[str] = None) -> str:
 class _ThinkTagStripper:
     """
     Stateful in-stream stripper for <think>…</think> blocks emitted by
-    reasoning models (Qwen 3.x). Buffers content inside <think> blocks and
-    discards it; passes through everything outside.
+    reasoning models. Buffers content inside <think> blocks and discards it;
+    passes through everything outside.
     """
 
     def __init__(self) -> None:
         self._inside_think = False
-        self._buf = ""  # partial tag accumulation buffer
+        self._buf = ""
 
     def feed(self, chunk: str) -> str:
-        """Process a streaming chunk; return only the displayable portion."""
         result_parts: List[str] = []
         i = 0
         text = self._buf + chunk
@@ -107,25 +137,18 @@ class _ThinkTagStripper:
 
         while i < len(text):
             if self._inside_think:
-                # Look for closing </think>
                 end = text.find("</think>", i)
                 if end == -1:
-                    # Not found yet; keep buffering (could be a partial tag)
-                    # Buffer up to 10 chars back in case </think> spans chunks
                     safe_up_to = max(i, len(text) - 10)
-                    i = len(text)  # consume everything
-                    # Nothing to emit while inside think block
-                    # Stash potential partial end tag
+                    i = len(text)
                     self._buf = text[safe_up_to:]
                     break
                 else:
                     i = end + len("</think>")
                     self._inside_think = False
             else:
-                # Look for opening <think>
                 start = text.find("<think>", i)
                 if start == -1:
-                    # No think block ahead — check for a partial "<think" at the tail
                     tail_check = max(i, len(text) - 7)
                     if text[tail_check:].startswith("<") and "<think>".startswith(text[tail_check:]):
                         result_parts.append(text[i:tail_check])
@@ -142,9 +165,13 @@ class _ThinkTagStripper:
         return "".join(result_parts)
 
 
-async def stream_groq_chat(
+# ---------------------------------------------------------------------------
+# Main streaming function (drop-in replacement for stream_groq_chat)
+# ---------------------------------------------------------------------------
+
+async def stream_hf_chat(
     messages: List[Dict[str, Any]],
-    model: str = "groq/compound",
+    model: str = "hf/mistral-7b-instruct",
     has_image: bool = False,
     image_url: Optional[str] = None,
     custom_endpoint: Optional[str] = None,
@@ -154,7 +181,7 @@ async def stream_groq_chat(
     original_model: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
-    Live-streams Groq API response as SSE.
+    Live-streams Hugging Face Inference API response as SSE.
 
     Yields:
         data: {"sessionId": "...", "model_used": "...", "fallback_triggered": bool}  (first event)
@@ -164,28 +191,32 @@ async def stream_groq_chat(
     On any error: yields a friendly SSE error message then [DONE].
     """
     # Re-read key fresh on every invocation
-    api_key = get_groq_key()
+    api_key = get_hf_key()
 
     # --- Key validation ---
-    if not is_valid_key(api_key):
+    if not is_valid_hf_key(api_key):
         key_prefix = api_key[:8] + "..." if api_key else "(empty)"
-        print(f"[ERROR] GROQ_API_KEY is missing or invalid on this deployment. Loaded key prefix: '{key_prefix}'. Set GROQ_API_KEY in Render environment variables.")
+        print(
+            f"[ERROR] HF_API_KEY is missing or invalid on this deployment. "
+            f"Loaded key prefix: '{key_prefix}'. Set HF_API_KEY in the Render environment variables."
+        )
         msg = (
             "⚠️ **AI Service Configuration Error**\n\n"
-            "The AI backend is missing its API key configuration. "
-            "The server administrator needs to set `GROQ_API_KEY` in the Render deployment environment variables.\n\n"
-            "**Loaded key prefix**: `" + key_prefix + "`\n\n"
+            "The AI backend is missing its Hugging Face API token. "
+            "The server administrator needs to set `HF_API_KEY` in the Render deployment environment variables.\n\n"
+            f"**Loaded key prefix**: `{key_prefix}`\n\n"
             "This is a server configuration issue — not something you can fix. "
             "Please contact the app administrator or wait for a fix.\n\n"
-            "Free Groq keys available at [console.groq.com/keys](https://console.groq.com/keys)."
+            "Free HF tokens are available at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)."
         )
         yield _build_error_sse(msg, "MISSING_API_KEY")
         yield "data: [DONE]\n\n"
         return
 
-    effective_model = model_used or model
+    # Resolve internal model ID to HF repo ID
+    effective_model = _resolve_hf_model(model_used or model)
 
-    # --- Build messages array for OpenAI-compatible endpoint ---
+    # --- Build messages array ---
     payload_messages = [{"role": "system", "content": SYSTEM_DOUBT_SOLVER_PROMPT}]
     last_idx = len(messages) - 1
     for idx, m in enumerate(messages):
@@ -193,7 +224,6 @@ async def stream_groq_chat(
         content = m.get("content", "")
 
         if role == "user" and image_url and idx == last_idx:
-            # Embed image as text description since vision models are unavailable
             payload_messages.append({
                 "role": "user",
                 "content": f"[Image attached — please analyze and respond to]: {content}",
@@ -213,11 +243,11 @@ async def stream_groq_chat(
         "stream": True,
     }
 
-    # --- HTTP streaming ---
-    api_url = custom_endpoint if custom_endpoint else "https://api.groq.com/openai/v1/chat/completions"
+    # Use custom_endpoint if provided, else default HF inference URL
+    api_url = custom_endpoint if custom_endpoint else HF_API_BASE
     stripper = _ThinkTagStripper() if is_reasoning_model else None
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
         try:
             async with client.stream(
                 "POST",
@@ -232,14 +262,18 @@ async def stream_groq_chat(
 
                     if resp.status_code == 401:
                         key_prefix = api_key[:8] + "..." if api_key else "(empty)"
-                        print(f"[ERROR] Groq 401 Unauthorized. The deployed GROQ_API_KEY was rejected. Prefix: '{key_prefix}'. Update GROQ_API_KEY in Render environment.")
+                        print(
+                            f"[ERROR] HF 401 Unauthorized. The deployed HF_API_KEY was rejected. "
+                            f"Prefix: '{key_prefix}'. Update HF_API_KEY in Render environment."
+                        )
                         msg = (
                             "⚠️ **AI Service Authentication Error (401)**\n\n"
-                            "The Groq API key configured on this server was rejected. "
-                            "The API key needs to be updated in the Render deployment environment variables.\n\n"
+                            "The Hugging Face API token configured on this server was rejected. "
+                            "The token needs to be updated in the Render deployment environment variables.\n\n"
                             f"**Key prefix used**: `{key_prefix}`\n\n"
                             "Please contact the app administrator. "
-                            "New keys can be generated at [console.groq.com/keys](https://console.groq.com/keys)."
+                            "New tokens can be generated at "
+                            "[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)."
                         )
                         yield _build_error_sse(msg, "INVALID_API_KEY_401")
 
@@ -247,20 +281,29 @@ async def stream_groq_chat(
                         msg = (
                             "⚠️ **Rate Limit Hit (429)**\n\n"
                             f"Model `{effective_model}` hit the free-tier rate limit. "
-                            "Wait ~60 seconds or try a different model."
+                            "Wait ~60 seconds and try again, or switch to a different model."
                         )
                         yield _build_error_sse(msg, "RATE_LIMIT_429")
 
                     elif resp.status_code in (503, 502, 500):
                         msg = (
-                            f"⚠️ **Groq Service Unavailable ({resp.status_code})**\n\n"
-                            "The Groq API is temporarily down. Please try again in a moment."
+                            f"⚠️ **Hugging Face Service Unavailable ({resp.status_code})**\n\n"
+                            "The HF Inference API is temporarily down. Please try again in a moment.\n\n"
+                            f"*Server response*: `{raw[:300]}`"
                         )
-                        yield _build_error_sse(msg, f"GROQ_SERVER_ERROR_{resp.status_code}")
+                        yield _build_error_sse(msg, f"HF_SERVER_ERROR_{resp.status_code}")
+
+                    elif resp.status_code == 503 or "loading" in raw.lower():
+                        msg = (
+                            "⏳ **Model Loading**\n\n"
+                            f"The model `{effective_model}` is loading on Hugging Face servers. "
+                            "Please retry in 20–30 seconds."
+                        )
+                        yield _build_error_sse(msg, "MODEL_LOADING_503")
 
                     else:
-                        msg = f"⚠️ **Groq API Error ({resp.status_code})**\n\n```\n{raw[:400]}\n```"
-                        yield _build_error_sse(msg, f"GROQ_HTTP_{resp.status_code}")
+                        msg = f"⚠️ **Hugging Face API Error ({resp.status_code})**\n\n```\n{raw[:400]}\n```"
+                        yield _build_error_sse(msg, f"HF_HTTP_{resp.status_code}")
 
                     yield "data: [DONE]\n\n"
                     return
@@ -284,29 +327,29 @@ async def stream_groq_chat(
                             .get("content", "")
                         )
                         if delta:
-                            # Strip <think> blocks for reasoning models
                             if stripper is not None:
                                 delta = stripper.feed(delta)
-                            if delta:  # may be empty after stripping
+                            if delta:
                                 yield f"data: {json.dumps({'content': delta, 'chunk': delta})}\n\n"
                     except Exception:
                         continue
 
-                # Ensure [DONE] even if Groq doesn't send it
+                # Ensure [DONE] even if HF doesn't send it
                 yield "data: [DONE]\n\n"
 
         except httpx.TimeoutException:
             msg = (
-                "⚠️ **Request Timed Out** — Groq took too long to respond.\n\n"
-                "Check your network connection and try again."
+                "⚠️ **Request Timed Out** — Hugging Face took too long to respond.\n\n"
+                "This can happen when a model is cold (not yet loaded on HF servers). "
+                "Please wait 20–30 seconds and retry."
             )
             yield _build_error_sse(msg, "TIMEOUT")
             yield "data: [DONE]\n\n"
 
         except httpx.ConnectError:
             msg = (
-                "⚠️ **Cannot Reach Groq API** — Connection refused.\n\n"
-                "Ensure you have internet access and `api.groq.com` is reachable."
+                "⚠️ **Cannot Reach Hugging Face API** — Connection refused.\n\n"
+                "Ensure the server has internet access and `api-inference.huggingface.co` is reachable."
             )
             yield _build_error_sse(msg, "CONNECT_ERROR")
             yield "data: [DONE]\n\n"
@@ -317,22 +360,26 @@ async def stream_groq_chat(
             yield "data: [DONE]\n\n"
 
 
+# ---------------------------------------------------------------------------
+# Probe function (used by fallback logic in main.py)
+# ---------------------------------------------------------------------------
+
 async def probe_model(model_id: str) -> bool:
     """
     Quick non-streaming probe to test if a model_id is callable.
     Returns True if the model returns HTTP 200, False otherwise.
-    Used by the fallback logic in main.py before committing to a model.
     """
-    api_key = get_groq_key()
-    if not is_valid_key(api_key):
+    api_key = get_hf_key()
+    if not is_valid_hf_key(api_key):
         return False
+    hf_model = _resolve_hf_model(model_id)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
             r = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
+                HF_API_BASE,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json={
-                    "model": model_id,
+                    "model": hf_model,
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 5,
                     "stream": False,

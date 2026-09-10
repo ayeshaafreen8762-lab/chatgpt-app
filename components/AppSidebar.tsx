@@ -76,7 +76,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
                 OmniAI Platform
               </span>
               <span className="text-[10px] font-medium text-emerald-400">
-                Groq Llama-3.3 70B
+                Mistral 7B · Hugging Face
               </span>
             </div>
           </div>

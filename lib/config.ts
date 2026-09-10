@@ -5,7 +5,7 @@
  */
 
 export const RENDER_BACKEND_URL = "https://chatgpt-app-backend-diif.onrender.com";
-export const DEFAULT_MODEL_ID = "groq/compound";
+export const DEFAULT_MODEL_ID = "hf/mistral-7b-instruct";
 
 let hasLoggedRuntimeApiBase = false;
 

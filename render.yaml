@@ -1,12 +1,12 @@
 # Render Blueprint Specification for FastAPI Backend
 #
-# IMPORTANT: GROQ_API_KEY must be set manually in the Render Dashboard
-# because GitHub secret scanning blocks pushing real API keys in plaintext.
+# IMPORTANT: HF_API_KEY must be set manually in the Render Dashboard
+# because GitHub secret scanning blocks pushing real API tokens in plaintext.
 #
 # Steps to set it:
 # 1. Go to https://dashboard.render.com
 # 2. Open the "omniai-backend" service → Environment tab
-# 3. Add GROQ_API_KEY = <your gsk_... key>
+# 3. Add HF_API_KEY = hf_... (your Hugging Face token)
 # 4. Click "Save Changes" — Render auto-redeploys.
 services:
   - type: web
@@ -18,7 +18,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
-      - key: GROQ_API_KEY
+      - key: HF_API_KEY
         sync: false
       - key: JWT_SECRET
         sync: false

@@ -200,7 +200,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 </div>
                 <div className="flex justify-between text-zinc-400">
                   <span>Inference Engine</span>
-                  <span className="text-zinc-200">Groq Cloud (Llama 3.3 70B & Vision)</span>
+                  <span className="text-zinc-200">Hugging Face Inference API (Mistral 7B)</span>
                 </div>
               </div>
 

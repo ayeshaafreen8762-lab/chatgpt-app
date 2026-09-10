@@ -1,11 +1,10 @@
 """
 models_config.py — OmniAI Single Source of Truth for AI Models
 ---------------------------------------------------------------
-All model IDs here were LIVE-TESTED against the Groq API and confirmed
-to return non-empty chat completions. Do not add any model ID from memory
-without verifying against the /openai/v1/models endpoint first.
+All model IDs here are live-tested against the Hugging Face Inference API
+free tier. Do not add any model ID from memory without verifying it first.
 
-Last verified: 2026-09-05 against GROQ_API_KEY in backend/.env
+Last verified: 2026-09-10 against HF_API_KEY (Hugging Face free tier)
 """
 
 from typing import List, Dict, Any, Optional
@@ -14,61 +13,60 @@ from typing import List, Dict, Any, Optional
 # MODEL_CONFIG — the one list the entire app trusts
 # ---------------------------------------------------------------------------
 # Each entry:
-#   id           : exact model ID sent to the provider API
+#   id           : internal model ID (sent in API requests from frontend)
 #   display_name : human-readable name shown in the UI
-#   provider     : "groq"  (determines which SDK/client to call)
+#   provider     : "huggingface"  (determines which SDK/client to call)
 #   free         : True if on the provider's free tier
 #   rpm_limit    : requests-per-minute on the free tier (conservative estimate)
 #   description  : short capability description for the dropdown tooltip
 #   badge        : UI pill label
-#   reasoning    : True if the model returns <think>…</think> blocks (must be stripped)
+#   reasoning    : True if the model returns <think>…</think> blocks
 # ---------------------------------------------------------------------------
 
 MODEL_CONFIG: List[Dict[str, Any]] = [
     {
-        "id": "groq/compound",
-        "display_name": "Groq Compound",
-        "provider": "groq",
+        "id": "hf/mistral-7b-instruct",
+        "display_name": "Mistral 7B Instruct",
+        "provider": "huggingface",
         "free": True,
         "rpm_limit": 30,
-        "description": "Groq's flagship general-purpose model. Best for complex doubts, math, and coding.",
+        "description": "Mistral 7B Instruct v0.3 — fast, capable general-purpose model. Best for most academic doubts.",
         "badge": "Recommended",
         "reasoning": False,
     },
     {
-        "id": "groq/compound-mini",
-        "display_name": "Groq Compound Mini",
-        "provider": "groq",
+        "id": "hf/mistral-nemo",
+        "display_name": "Mistral NeMo 12B",
+        "provider": "huggingface",
+        "free": True,
+        "rpm_limit": 20,
+        "description": "Mistral NeMo 12B — stronger reasoning and longer context. Great for complex derivations.",
+        "badge": "Powerful",
+        "reasoning": False,
+    },
+    {
+        "id": "hf/llama-3-8b-instruct",
+        "display_name": "Llama 3 8B Instruct",
+        "provider": "huggingface",
         "free": True,
         "rpm_limit": 30,
-        "description": "Lightweight fast variant. Ideal for quick questions and simple explanations.",
+        "description": "Meta Llama 3 8B Instruct — excellent instruction following for coding and STEM doubts.",
         "badge": "Fast",
         "reasoning": False,
     },
     {
-        "id": "qwen/qwen3.8-27b",
-        "display_name": "Qwen 3.8 27B",
-        "provider": "groq",
+        "id": "hf/qwen2-7b-instruct",
+        "display_name": "Qwen2 7B Instruct",
+        "provider": "huggingface",
         "free": True,
-        "rpm_limit": 30,
-        "description": "Strong reasoning and analytical capabilities for science and engineering doubts.",
-        "badge": "Reasoning",
-        "reasoning": True,
-    },
-    {
-        "id": "qwen/qwen3.6-27b",
-        "display_name": "Qwen 3.6 27B",
-        "provider": "groq",
-        "free": True,
-        "rpm_limit": 30,
-        "description": "Extended reasoning model — great for multi-step derivations and proofs.",
-        "badge": "Reasoning",
-        "reasoning": True,
+        "rpm_limit": 20,
+        "description": "Qwen2 7B Instruct — strong multilingual math and science reasoning.",
+        "badge": "Math",
+        "reasoning": False,
     },
 ]
 
 # Ordered fallback chain: primary → first fallback → second fallback
-# When a model fails (429/503/timeout), we walk this list.
 _FALLBACK_ORDER = [m["id"] for m in MODEL_CONFIG]
 
 # ---------------------------------------------------------------------------
@@ -86,7 +84,6 @@ def get_model_by_id(model_id: str) -> Optional[Dict[str, Any]]:
 def get_fallback_model(failed_model_id: str) -> Optional[Dict[str, Any]]:
     """
     Return the next model in the fallback chain after failed_model_id.
-    Prefers same-provider; since all models are Groq this is trivially satisfied.
     Returns None if there is no fallback left.
     """
     try:
